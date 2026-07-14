@@ -2,7 +2,7 @@
 	"$schema": "../node_modules/@companion-module/base/assets/manifest.schema.json",
 	"id": "fora-processors",
 	"name": "FOR-A Processors",
-	"shortname": "fora",
+	"shortname": "fora-processor",
 	"description": "Control FOR-A video processors (FA-1616, FA-9600).",
 	"version": "0.0.0",
 	"license": "MIT",
