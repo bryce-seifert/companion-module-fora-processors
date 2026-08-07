@@ -1,6 +1,6 @@
 import type { CompanionInputFieldDropdown, CompanionOptionValues } from '@companion-module/base'
-import type { ControlSummary } from './api.js'
-import type { EnumChoice } from './state.js'
+import type { ControlSpec } from './definitions/controls.js'
+import { controlKey, type VariableDefinition } from './definitions/shared.js'
 
 // Human labels for the selector dropdowns, keyed by group-selector dimension.
 export const DIMENSION_LABELS: Record<string, string> = {
@@ -17,82 +17,84 @@ export const DIMENSION_LABELS: Record<string, string> = {
 }
 
 export interface Selector {
-	dim: string
-	label: string
-	choices: { id: string; label: string }[]
+	readonly dim: string
+	readonly label: string
+	readonly choices: readonly { id: string; label: string }[]
 }
 
-// The `idPrefix` each layer passes to toLogical, kept in one place so actions/feedbacks/presets
-// never disagree on the id a given logical control resolves to.
-export const ID_PREFIX = {
-	number: { action: 'num', feedback: 'numf' },
-	boolean: { action: 'bool', feedback: 'boolf' },
-	enum: { action: 'enum', feedback: 'enumf' },
-} as const
-
-// `variantById` maps a selection (dimension values joined by `|`) back to the concrete variable id.
-// `displayName` is `name` prefixed with its category so actions/feedbacks list grouped by category.
+// One action/feedback in the UI, collapsing every instance of a parameter (FS1/FS2, channels
+// 1-32...) behind a selector dropdown per dimension. `variantById` maps a selection (dimension
+// values joined by `|`) back to the concrete variable id. `displayName` is `name` prefixed with
+// its category so the actions and feedbacks lists read grouped by category.
 export interface LogicalControl {
-	id: string
-	name: string
-	displayName: string
-	category?: string
-	selectors: Selector[]
-	variantById: Map<string, string>
-	choices?: EnumChoice[]
+	readonly key: string
+	readonly name: string
+	readonly displayName: string
+	readonly category: string | undefined
+	readonly spec: ControlSpec
+	readonly selectors: readonly Selector[]
+	readonly variantById: ReadonlyMap<string, string>
 }
 
-// Collapse grouped parameter instances into logical controls, sorted by category + name.
-export function toLogical(items: ControlSummary[], idPrefix: string): LogicalControl[] {
+// A control key is unique across the model, so one id per layer is enough.
+export const actionId = (logical: LogicalControl): string => `act_${logical.key}`
+export const feedbackId = (logical: LogicalControl): string => `fb_${logical.key}`
+
+// Collapse the definition table into its logical controls, sorted by category + name.
+export function buildLogicalControls(definitions: readonly VariableDefinition[]): LogicalControl[] {
 	interface Accumulator {
-		id: string
+		key: string
 		name: string
-		category?: string
+		category: string | undefined
+		spec: ControlSpec
 		dims: string[]
 		dimChoices: Map<string, Map<string, string>>
 		variantById: Map<string, string>
-		choices?: EnumChoice[]
 	}
 	const accumulators = new Map<string, Accumulator>()
 
-	for (const item of items) {
-		const groupKey = item.group ? `g:${item.group.key}` : `i:${item.id}`
-		let acc = accumulators.get(groupKey)
+	for (const def of definitions) {
+		const key = controlKey(def)
+		let acc = accumulators.get(key)
 		if (!acc) {
 			acc = {
-				id: `${idPrefix}_${item.group?.key ?? item.id}`,
-				name: item.group?.name ?? item.name,
-				category: item.category,
-				dims: item.group ? item.group.selectors.map((selector) => selector.dim) : [],
+				key,
+				name: def.group?.name ?? def.name,
+				category: def.category,
+				spec: def.control,
+				dims: def.group ? def.group.selectors.map((selector) => selector.dim) : [],
 				dimChoices: new Map(),
 				variantById: new Map(),
-				choices: item.choices,
 			}
-			accumulators.set(groupKey, acc)
+			accumulators.set(key, acc)
 		}
 
-		const selectors = item.group?.selectors ?? []
+		const selectors = def.group?.selectors ?? []
 		for (const selector of selectors) {
 			const values = acc.dimChoices.get(selector.dim) ?? new Map<string, string>()
 			values.set(selector.value, selector.label)
 			acc.dimChoices.set(selector.dim, values)
 		}
-		acc.variantById.set(selectors.map((selector) => selector.value).join('|'), item.id)
+		acc.variantById.set(selectors.map((selector) => selector.value).join('|'), def.id)
 	}
 
 	const logicals = [...accumulators.values()].map((acc) => ({
-		id: acc.id,
+		key: acc.key,
 		name: acc.name,
 		displayName: acc.category ? `${acc.category} - ${acc.name}` : acc.name,
 		category: acc.category,
-		choices: acc.choices,
+		spec: acc.spec,
 		variantById: acc.variantById,
 		selectors: acc.dims.map((dim) => ({
 			dim,
 			label: DIMENSION_LABELS[dim] ?? dim,
-			choices: [...(acc.dimChoices.get(dim) ?? new Map())]
-				.map(([value, label]) => ({ id: value, label }))
-				.sort((a, b) => a.id.localeCompare(b.id)),
+			// Preserve the order values were first encountered in the definition table (e.g. PRU
+			// A1-A4, B1-B4) rather than sorting lexicographically, which would scatter unpadded
+			// numeric ids like "101" between "1" and "2".
+			choices: [...(acc.dimChoices.get(dim) ?? new Map<string, string>())].map(([value, label]) => ({
+				id: value,
+				label,
+			})),
 		})),
 	}))
 	logicals.sort((a, b) => a.displayName.localeCompare(b.displayName))
@@ -105,7 +107,7 @@ export function selectorFields(logical: LogicalControl): CompanionInputFieldDrop
 		id: selector.dim,
 		label: selector.label,
 		default: selector.choices[0]?.id,
-		choices: selector.choices,
+		choices: [...selector.choices],
 	}))
 }
 

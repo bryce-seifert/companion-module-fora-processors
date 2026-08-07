@@ -1,4 +1,15 @@
-import { CATEGORY, cap, pad, range, type ControlGroup, type GroupSelector, type VariableDefinition } from './shared.js'
+import { choice, type EnumSpec } from './controls.js'
+import { FA1616_CONTROLS } from './fa1616-controls.js'
+import {
+	attachControls,
+	CATEGORY,
+	cap,
+	pad,
+	range,
+	type DefinitionDraft,
+	type GroupSelector,
+	type VariableDefinition,
+} from './shared.js'
 
 // Instances are block-numbered PRUs, each with four lanes (a–d) sharing the same parameter
 // set, so every logical parameter collapses into one action with PRU/Lane selectors.
@@ -18,6 +29,14 @@ function pruLabel(n: number): string {
 const pruSelector = (n: number): GroupSelector => ({ dim: 'pru', value: String(n), label: pruLabel(n) })
 const laneSelector = (lane: string): GroupSelector => ({ dim: 'lane', value: lane, label: lane.toUpperCase() })
 
+// Readable dimension tokens for ids ("prub4", "lanea") — mirrors the emb1/ch01 convention in fa9600.ts.
+const pruTag = (n: number): string => `pru${pruLabel(n).toLowerCase()}`
+const laneTag = (lane: string): string => `lane${lane}`
+
+// Readable suffix for names: "PRU B4" or "PRU B4 Lane B".
+const pruNameSuffix = (n: number, lane?: string): string =>
+	lane ? `PRU ${pruLabel(n)} Lane ${lane.toUpperCase()}` : `PRU ${pruLabel(n)}`
+
 // An extra selector dimension (e.g. Color, Component) that folds sibling parameters into one action.
 interface ColorProcVariant {
 	readonly dim: string
@@ -30,7 +49,7 @@ interface ColorProcVariant {
 // One parameter per PRU x lane. When `variant` is given, an extra selector dimension folds
 // sibling parameters (R/G/B, R-Y/G-Y/B-Y...) into the same action too.
 function addColorProc(
-	defs: VariableDefinition[],
+	defs: DefinitionDraft[],
 	prus: readonly number[],
 	key: string,
 	name: string,
@@ -42,8 +61,8 @@ function addColorProc(
 		for (const lane of LANES) {
 			const base = `root/processor/video/color-processor/color-processor-${n}/color-processor-${n}${lane}`
 			defs.push({
-				id: `cp_${n}${lane}_${key}${variant ? `_${variant.value.replace(/-/g, '')}` : ''}`,
-				name: `CP ${name}${variant ? ` ${variant.label}` : ''}`,
+				id: `cp_${pruTag(n)}_${laneTag(lane)}_${key}${variant ? `_${variant.value.replace(/-/g, '')}` : ''}`,
+				name: `CP ${name}${variant ? ` ${variant.label}` : ''} ${pruNameSuffix(n, lane)}`,
 				path: `${base}/${leaf}`,
 				category,
 				group: {
@@ -58,8 +77,7 @@ function addColorProc(
 	}
 }
 
-// Names below follow the Functions.csv "Item" column so actions read as complete labels
-// rather than internal node abbreviations (Pre-Amp, Bal, Diff, RGB Clip, CC Bypass…).
+// Names as complete labels, not abbreviations.
 const LEVEL_NAME: Record<string, string> = {
 	video: 'Video Level',
 	y: 'Y Level',
@@ -73,8 +91,8 @@ const GAIN_NAME: Record<string, string> = {
 	'total-gain': 'Total Gain',
 }
 
-function colorProcessorDefinitions(): VariableDefinition[] {
-	const defs: VariableDefinition[] = []
+function colorProcessorDefinitions(): DefinitionDraft[] {
+	const defs: DefinitionDraft[] = []
 
 	for (const p of ['video', 'y', 'chroma', 'black', 'hue']) {
 		addColorProc(defs, PRU_VIDEO, `preamp_${p}`, LEVEL_NAME[p], `pre-amplifier/${p}`, CATEGORY.SIGNAL_PROCESSING)
@@ -102,15 +120,16 @@ function colorProcessorDefinitions(): VariableDefinition[] {
 		CATEGORY.SIGNAL_PROCESSING,
 	)
 
+	//Clip-mode is white-only; the black node exposes just enable + output-clip.
+	addColorProc(
+		defs,
+		PRU_VIDEO,
+		'rgbclip_white_mode',
+		'White Clip Mode',
+		'rgb-clip/white/clip-mode',
+		CATEGORY.SIGNAL_PROCESSING,
+	)
 	for (const group of ['white', 'black']) {
-		addColorProc(
-			defs,
-			PRU_VIDEO,
-			`rgbclip_${group}_mode`,
-			`${cap(group)} Clip Mode`,
-			`rgb-clip/${group}/clip-mode`,
-			CATEGORY.SIGNAL_PROCESSING,
-		)
 		addColorProc(
 			defs,
 			PRU_VIDEO,
@@ -130,7 +149,7 @@ function colorProcessorDefinitions(): VariableDefinition[] {
 			addColorProc(
 				defs,
 				PRU_VIDEO,
-				`diff_${group}_${comp.replace('-', '')}`,
+				`diff_${group}`,
 				`CC Differential ${cap(group)} Level`,
 				`differential/${group}/${comp}`,
 				CATEGORY.SIGNAL_PROCESSING,
@@ -158,13 +177,13 @@ function colorProcessorDefinitions(): VariableDefinition[] {
 	return defs
 }
 
-function synchronizerDefinitions(): VariableDefinition[] {
-	const defs: VariableDefinition[] = []
+function synchronizerDefinitions(): DefinitionDraft[] {
+	const defs: DefinitionDraft[] = []
 	const addPru = (key: string, name: string, leaf: string, category: string) => {
 		for (const n of PRU_VIDEO) {
 			defs.push({
-				id: `sync_${n}_${key}`,
-				name: `Sync ${name}`,
+				id: `sync_${pruTag(n)}_${key}`,
+				name: `Sync ${name} ${pruNameSuffix(n)}`,
 				path: `root/processor/video/synchronizer/synchronizer-${n}/${leaf}`,
 				category,
 				group: { key: `sync_${key}`, name, selectors: [pruSelector(n)] },
@@ -172,34 +191,36 @@ function synchronizerDefinitions(): VariableDefinition[] {
 		}
 	}
 
-	const fmt = 'synchronizer-format/format'
-	addPru('mode', 'Sync Mode', `${fmt}/sync-mode`, CATEGORY.SYNCHRONIZATION)
+	// sync-mode / loss-mode / back-color sit on `synchronizer-format` itself, not its `format` child.
+	const sf = 'synchronizer-format'
+	const fmt = `${sf}/format`
+	addPru('mode', 'Sync Mode', `${sf}/sync-mode`, CATEGORY.SYNCHRONIZATION)
 	addPru('standard', 'Standard', `${fmt}/standard`, CATEGORY.SYNCHRONIZATION)
 	addPru('rate', 'Rate', `${fmt}/rate`, CATEGORY.SYNCHRONIZATION)
 	addPru('level', '3G SDI Output Level', `${fmt}/level`, CATEGORY.UTILITIES)
 	addPru('division', 'SQD / 2SI Division', `${fmt}/division`, CATEGORY.WORKFLOW_4K)
 	addPru('format_status', 'Output Format Status', `${fmt}/format-status`, CATEGORY.SYNCHRONIZATION)
 	addPru('is_manual', 'Sync Setting Mode (Auto/Manual)', `${fmt}/is-manual`, CATEGORY.SYNCHRONIZATION)
-	addPru('loss_mode', 'Video Input Loss Mode', `${fmt}/loss-mode`, CATEGORY.UTILITIES)
-	addPru('back_color', 'Back Color', `${fmt}/back-color`, CATEGORY.UTILITIES)
+	addPru('loss_mode', 'Video Input Loss Mode', `${sf}/loss-mode`, CATEGORY.UTILITIES)
+	addPru('back_color', 'Back Color', `${sf}/back-color`, CATEGORY.UTILITIES)
 	addPru('h_timing', 'Horizontal Phase', 'adjust-timing/h-timing', CATEGORY.SYNCHRONIZATION)
 	addPru('v_timing', 'Vertical Phase', 'adjust-timing/v-timing', CATEGORY.SYNCHRONIZATION)
 	addPru('genlock_status', 'Genlock Status', 'reference-select/genlock-status', CATEGORY.SYNCHRONIZATION)
 	addPru('genlock_in_signal', 'Genlock In Signal', 'reference-select/genlock-in-signal', CATEGORY.SYNCHRONIZATION)
 	addPru('ptp_signal', 'PTP/Input Lock Signal', 'reference-select/ptp-signal', CATEGORY.SYNCHRONIZATION)
 
-	// Per-lane delay status lives under the synchronizer node, not per-lane.
+	// Per-lane delay status hangs off adjust-timing. `delay-stauts` is the device's own misspelling
 	for (const n of PRU_VIDEO) {
 		for (const lane of LANES) {
-			const base = `root/processor/video/synchronizer/synchronizer-${n}/delay-status/lane-${lane}`
+			const base = `root/processor/video/synchronizer/synchronizer-${n}/adjust-timing/delay-stauts/lane-${lane}`
 			for (const [leaf, key, name] of [
 				['sdi-delay', 'sdi_delay', 'SDI Latency'],
 				['ip-delay', 'ip_delay', 'IP Latency'],
 				['total-delay', 'total_delay', 'Signal Latency'],
 			] as const) {
 				defs.push({
-					id: `sync_${n}${lane}_${key}`,
-					name: `Sync ${name}`,
+					id: `sync_${pruTag(n)}_${laneTag(lane)}_${key}`,
+					name: `Sync ${name} ${pruNameSuffix(n, lane)}`,
 					path: `${base}/${leaf}`,
 					category: CATEGORY.SIGNAL_STATUS,
 					group: { key: `sync_${key}`, name, selectors: [pruSelector(n), laneSelector(lane)] },
@@ -211,9 +232,8 @@ function synchronizerDefinitions(): VariableDefinition[] {
 	return defs
 }
 
-// VERIFY: Functions table roots this at `root/test-signal-freeze`; manual groups it under the video block (used here).
-function freezeDefinitions(): VariableDefinition[] {
-	const defs: VariableDefinition[] = []
+function freezeDefinitions(): DefinitionDraft[] {
+	const defs: DefinitionDraft[] = []
 	for (const n of PRU_VIDEO) {
 		for (const lane of LANES) {
 			const base = `root/processor/video/test-signal-freeze/test-signal-freeze-${n}/test-signal-freeze-${n}${lane}`
@@ -223,8 +243,8 @@ function freezeDefinitions(): VariableDefinition[] {
 				['test', 'test', 'Video Test Signal'],
 			] as const) {
 				defs.push({
-					id: `freeze_${n}${lane}_${key}`,
-					name,
+					id: `freeze_${pruTag(n)}_${laneTag(lane)}_${key}`,
+					name: `${name} ${pruNameSuffix(n, lane)}`,
 					path: `${base}/${leaf}`,
 					category: CATEGORY.UTILITIES,
 					group: { key: `freeze_${key}`, name, selectors: [pruSelector(n), laneSelector(lane)] },
@@ -235,24 +255,40 @@ function freezeDefinitions(): VariableDefinition[] {
 	return defs
 }
 
+// Input select is the one parameter whose choices differ between instances: each PRU sees only
+// its own SDI/IP bus. Block-A (1-4) reads the A bus, Block-B (101-104) the B bus, and Block-C
+// (201-204) reaches both, with the B bus offset by 100.
+function inputSelectSpec(n: number): EnumSpec {
+	const bus = (label: string, offset: number) =>
+		[
+			...range(1, 8).map((i) => [offset + i - 1, `SDI ${label}${i}`] as const),
+			...range(1, 8).map((i) => [offset + 16 + i - 1, `IP ${label}${i}`] as const),
+			...range(1, 4).map((i) => [offset + 24 + i - 1, `RECV ${label === 'A' ? 2 : 4}-${i}`] as const),
+		] as const
+
+	if (n >= 200) return choice('readwrite', [...bus('A', 0), ...bus('B', 100)])
+	return n >= 100 ? choice('readwrite', bus('B', 0)) : choice('readwrite', bus('A', 0))
+}
+
 // VERIFY: manual's CSV lost identifiers for the `path` block; these follow the Functions-table paths.
-function pathDefinitions(): VariableDefinition[] {
-	const defs: VariableDefinition[] = []
+function pathDefinitions(): DefinitionDraft[] {
+	const defs: DefinitionDraft[] = []
 	for (const n of PRU_AUDIO) {
 		for (const lane of LANES) {
 			const base = `root/path/pru-input-select/pru-input-select-${n}/pru-input-select-${n}${lane}`
 			defs.push({
-				id: `input_select_${n}${lane}`,
-				name: 'Video Input Select',
+				id: `input_select_${pruTag(n)}_${laneTag(lane)}`,
+				name: `Video Input Select ${pruNameSuffix(n, lane)}`,
 				path: `${base}/select`,
 				category: CATEGORY.PATH_ROUTING,
+				control: inputSelectSpec(n),
 				group: { key: 'input_select', name: 'Video Input Select', selectors: [pruSelector(n), laneSelector(lane)] },
 			})
 		}
 		// input-link: 4K workflow linking, not part of the video-block VERIFY note above.
 		defs.push({
-			id: `input_link_${n}`,
-			name: 'Input Link (4KFS/Workflow)',
+			id: `input_link_${pruTag(n)}`,
+			name: `Input Link (4KFS/Workflow) ${pruNameSuffix(n)}`,
 			path: `root/path/pru-input-select/pru-input-select-${n}/input-link`,
 			category: CATEGORY.FS_LINKING,
 			group: { key: 'input_link', name: 'Input Link (4KFS/Workflow)', selectors: [pruSelector(n)] },
@@ -261,10 +297,10 @@ function pathDefinitions(): VariableDefinition[] {
 	return defs
 }
 
-// VERIFY: manual lost identifiers for the `audio` block; these follow the Functions-table paths.
 // Channel count (64 per PRU) and the PRU set are the most likely values to need trimming after hardware discovery.
-function audioDefinitions(): VariableDefinition[] {
-	const defs: VariableDefinition[] = []
+function audioDefinitions(): DefinitionDraft[] {
+	const defs: DefinitionDraft[] = []
+	const AUDIO = 'root/processor/audio'
 	const groupSel = (g: number): GroupSelector => ({ dim: 'group', value: String(g), label: `Grp ${g}` })
 	const chSel = (ch: number): GroupSelector => ({ dim: 'ch', value: pad(ch, 2), label: `Ch ${pad(ch, 2)}` })
 
@@ -274,9 +310,9 @@ function audioDefinitions(): VariableDefinition[] {
 			for (const ch of range((g - 1) * 16 + 1, g * 16)) {
 				const chp = pad(ch, 2)
 				defs.push({
-					id: `aud_gain_${n}_g${g}_ch${chp}`,
-					name: 'Per-Channel Gain (Embedded)',
-					path: `root/audio/audio-gain/audio-gain-${n}/group-${g}/ch-${chp}/gain`,
+					id: `aud_gain_${pruTag(n)}_g${g}_ch${chp}`,
+					name: `Per-Channel Gain (Embedded) PRU ${pruLabel(n)} Grp${g} Ch${chp}`,
+					path: `${AUDIO}/audio-gain/audio-gain-${n}/group-${g}/ch-${chp}/gain`,
 					category: CATEGORY.GAIN_DELAY,
 					group: {
 						key: 'aud_gain',
@@ -285,9 +321,9 @@ function audioDefinitions(): VariableDefinition[] {
 					},
 				})
 				defs.push({
-					id: `aud_delay_${n}_g${g}_ch${chp}`,
-					name: 'Per-Channel Delay (Embedded)',
-					path: `root/audio/audio-delay/audio-delay-${n}/adjust-delay/group-${g}/ch-${chp}/delay`,
+					id: `aud_delay_${pruTag(n)}_g${g}_ch${chp}`,
+					name: `Per-Channel Delay (Embedded) PRU ${pruLabel(n)} Grp${g} Ch${chp}`,
+					path: `${AUDIO}/audio-delay/audio-delay-${n}/adjust-delay/group-${g}/ch-${chp}/delay`,
 					category: CATEGORY.GAIN_DELAY,
 					group: {
 						key: 'aud_delay',
@@ -297,16 +333,16 @@ function audioDefinitions(): VariableDefinition[] {
 				})
 			}
 			defs.push({
-				id: `aud_mute_${n}_g${g}`,
-				name: 'Mute (Per Group/PRU)',
-				path: `root/audio/audio-gain/audio-gain-${n}/group-${g}/master-mute`,
+				id: `aud_mute_${pruTag(n)}_g${g}`,
+				name: `Mute (Per Group/PRU) PRU ${pruLabel(n)} Grp${g}`,
+				path: `${AUDIO}/audio-gain/audio-gain-${n}/group-${g}/master-mute`,
 				category: CATEGORY.GAIN_DELAY,
 				group: { key: 'aud_mute', name: 'Mute (Per Group/PRU)', selectors: [pruSelector(n), groupSel(g)] },
 			})
 			defs.push({
-				id: `aud_test_${n}_g${g}`,
-				name: 'Embedded Audio Test Signal',
-				path: `root/audio/test-signal-mute/test-signal-mute-${n}/group-${g}/mode`,
+				id: `aud_test_${pruTag(n)}_g${g}`,
+				name: `Embedded Audio Test Signal PRU ${pruLabel(n)} Grp${g}`,
+				path: `${AUDIO}/test-signal-mute/test-signal-mute-${n}/group-${g}/mode`,
 				category: CATEGORY.TEST_SIGNALS,
 				group: { key: 'aud_test', name: 'Embedded Audio Test Signal', selectors: [pruSelector(n), groupSel(g)] },
 			})
@@ -316,7 +352,7 @@ function audioDefinitions(): VariableDefinition[] {
 	defs.push({
 		id: 'aud_reference_level',
 		name: 'Reference Level (-18/-20 dBFS)',
-		path: 'root/audio/test-signal-mute/tone-level',
+		path: `${AUDIO}/test-signal-mute/tone-level`,
 		category: CATEGORY.HARDWARE_STANDARDS,
 	})
 	return defs
@@ -324,15 +360,27 @@ function audioDefinitions(): VariableDefinition[] {
 
 // Primary load/save/delete are Ember+ Functions this module doesn't invoke; these are the
 // Write-Only "alternative" parameters instead.
-function eventDefinitions(): VariableDefinition[] {
+function eventDefinitions(): DefinitionDraft[] {
 	const event = 'root/utility/event'
-	const defs: VariableDefinition[] = [
-		{ id: 'event_load', name: 'Load Event (Number)', path: `${event}/alt-load-event`, category: CATEGORY.EVENT_MEMORY },
-		{ id: 'event_save', name: 'Save Event (Number)', path: `${event}/alt-save-event`, category: CATEGORY.EVENT_MEMORY },
+	// The device's identifiers for the alternative parameters and for `event-item` carry a
+	// trailing space; it is part of the identifier and must be matched verbatim.
+	const defs: DefinitionDraft[] = [
+		{
+			id: 'event_load',
+			name: 'Load Event (Number)',
+			path: `${event}/alt-load-event `,
+			category: CATEGORY.EVENT_MEMORY,
+		},
+		{
+			id: 'event_save',
+			name: 'Save Event (Number)',
+			path: `${event}/alt-save-event `,
+			category: CATEGORY.EVENT_MEMORY,
+		},
 		{
 			id: 'event_delete',
 			name: 'Delete Event (Number)',
-			path: `${event}/alt-delete-event`,
+			path: `${event}/alt-delete-event `,
 			category: CATEGORY.EVENT_MEMORY,
 		},
 		{
@@ -356,7 +404,7 @@ function eventDefinitions(): VariableDefinition[] {
 		defs.push({
 			id: `event_overwrite_${pad(i, 3)}`,
 			name: 'Event Overwrite',
-			path: `${event}/event-item/${bucket}/event${pad(i, 3)}/overwrite`,
+			path: `${event}/event-item /${bucket}/event${pad(i, 3)}/overwrite`,
 			category: CATEGORY.EVENT_MEMORY,
 			group: {
 				key: 'event_overwrite',
@@ -368,42 +416,16 @@ function eventDefinitions(): VariableDefinition[] {
 	return defs
 }
 
-// FA-1616-only: user + preset labels.
-function labelDefinitions(): VariableDefinition[] {
-	const defs: VariableDefinition[] = []
-	const common = 'root/processor/video/color-processor/common'
-	const add = (id: string, name: string, path: string, group?: ControlGroup) =>
-		defs.push({ id, name, path, category: CATEGORY.METADATA_LABELING, group })
-
-	// User labels 01–50, bucketed in twenties (user-label-01-20 / 21-40 / 41-50).
-	for (const i of range(1, 50)) {
-		const bucketStart = Math.floor((i - 1) / 20) * 20 + 1
-		const bucketEnd = Math.min(bucketStart + 19, 50)
-		const bucket = `user-label-${pad(bucketStart, 2)}-${pad(bucketEnd, 2)}`
-		add(`user_label_${pad(i, 2)}`, `User Label ${pad(i, 2)}`, `${common}/${bucket}/u-${pad(i, 2)}/name`, {
-			key: 'user_label',
-			name: 'User Label',
-			selectors: [{ dim: 'label', value: pad(i, 2), label: `Label ${pad(i, 2)}` }],
-		})
-	}
-	for (const i of range(1, 20)) {
-		add(`preset_label_${pad(i, 2)}`, `Preset Label ${pad(i, 2)}`, `${common}/preset-label-01-20/p-${pad(i, 2)}/name`, {
-			key: 'preset_label',
-			name: 'Preset Label',
-			selectors: [{ dim: 'label', value: pad(i, 2), label: `Label ${pad(i, 2)}` }],
-		})
-	}
-	return defs
-}
-
 export function buildFa1616Definitions(): VariableDefinition[] {
-	return [
-		...colorProcessorDefinitions(),
-		...synchronizerDefinitions(),
-		...freezeDefinitions(),
-		...pathDefinitions(),
-		...audioDefinitions(),
-		...eventDefinitions(),
-		...labelDefinitions(),
-	]
+	return attachControls(
+		[
+			...colorProcessorDefinitions(),
+			...synchronizerDefinitions(),
+			...freezeDefinitions(),
+			...pathDefinitions(),
+			...audioDefinitions(),
+			...eventDefinitions(),
+		],
+		FA1616_CONTROLS,
+	)
 }

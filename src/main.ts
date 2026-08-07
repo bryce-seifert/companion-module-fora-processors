@@ -1,18 +1,21 @@
 import { InstanceBase, runEntrypoint, SomeCompanionConfigField } from '@companion-module/base'
-import { GetConfigFields, type ModuleConfig } from './config.js'
-import { UpdateVariableDefinitions } from './variables.js'
-import { UpgradeScripts } from './upgrades.js'
 import { UpdateActions } from './actions.js'
-import { UpdateFeedbacks } from './feedbacks.js'
-import { UpdatePresets } from './presets.js'
 import { ForaApi } from './api.js'
+import { GetConfigFields, type ModuleConfig } from './config.js'
+import { UpdateFeedbacks } from './feedbacks.js'
+import { buildLogicalControls, type LogicalControl } from './logical-controls.js'
+import { UpdatePresets } from './presets.js'
 import { buildDefinitions, DeviceStateStore, type VariableDefinition } from './state.js'
+import { UpgradeScripts } from './upgrades.js'
+import { UpdateVariableDefinitions } from './variables.js'
 
 export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	config!: ModuleConfig
 	api!: ForaApi
 	state!: DeviceStateStore
+	// The selected model's fixed parameter table
 	definitions: readonly VariableDefinition[] = []
+	logicalControls: readonly LogicalControl[] = []
 
 	constructor(internal: unknown) {
 		super(internal)
@@ -20,15 +23,10 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 
 	async init(config: ModuleConfig): Promise<void> {
 		this.config = config
-		this.definitions = buildDefinitions(config.model)
 		this.state = new DeviceStateStore(this)
 		this.api = new ForaApi(this)
 
-		this.updateActions()
-		this.updateFeedbacks()
-		this.updatePresets()
-		this.updateVariableDefinitions()
-
+		this.#rebuildForModel()
 		this.#startConnection()
 	}
 
@@ -39,10 +37,17 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 
 	async configUpdated(config: ModuleConfig): Promise<void> {
 		this.config = config
-		// Model may have changed — rebuild definitions and re-register variables before reconnecting.
-		this.definitions = buildDefinitions(config.model)
-		this.updateVariableDefinitions()
+		this.#rebuildForModel()
 		this.#startConnection()
+	}
+
+	#rebuildForModel(): void {
+		this.definitions = buildDefinitions(this.config.model)
+		this.logicalControls = buildLogicalControls(this.definitions)
+		UpdateVariableDefinitions(this)
+		UpdateActions(this)
+		UpdateFeedbacks(this)
+		UpdatePresets(this)
 	}
 
 	#startConnection(): void {
@@ -53,22 +58,6 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 
 	getConfigFields(): SomeCompanionConfigField[] {
 		return GetConfigFields()
-	}
-
-	updateActions(): void {
-		UpdateActions(this)
-	}
-
-	updateFeedbacks(): void {
-		UpdateFeedbacks(this)
-	}
-
-	updatePresets(): void {
-		UpdatePresets(this)
-	}
-
-	updateVariableDefinitions(): void {
-		UpdateVariableDefinitions(this)
 	}
 }
 

@@ -1,62 +1,25 @@
 import { InstanceStatus } from '@companion-module/base'
 import { EmberClient, Model, Types } from 'emberplus-connection'
+import { isWritable, type ControlSpec } from './definitions/controls.js'
 import type { ModuleInstance } from './main.js'
-import { DEVICE_ID_PATH, getModelSpec, type ModelSpec } from './models.js'
-import {
-	classifyParameter,
-	enumChoices,
-	formatParameterValue,
-	groupByParent,
-	PATH_DELIMITER,
-	type ControlGroup,
-	type ControlKind,
-	type EnumChoice,
-	type ParentGroupMember,
-	type VariableDefinition,
-} from './state.js'
+import { describeIdentitySource, getModelSpec, type ModelSpec } from './models.js'
+import { formatValue, groupByParent, PATH_DELIMITER, type ParentGroupMember, type VariableDefinition } from './state.js'
+import { walkDefinitions } from './walk.js'
 
-// A parameter resolved at connect time and exposed to the actions/feedbacks layers.
-interface ControlEntry {
+const RECONNECT_INTERVAL_MS = 5000
+const POPULATE_CONCURRENCY = 32
+const REQUEST_TIMEOUT_MS = 10000
+const HEARTBEAT_INTERVAL_MS = 8000
+const WALK_MAX_ATTEMPTS = 3
+
+// A definition matched to the live parameter node it resolved to. The node is what `setValue` and
+// `subscribe` need; everything else comes from `def.control`.
+interface LiveParameter {
 	readonly def: VariableDefinition
 	readonly node: Model.NumberedTreeNode<Model.Parameter>
-	readonly kind: ControlKind
-	readonly parameterType: Model.ParameterType
-	readonly writable: boolean
-	readonly min?: number
-	readonly max?: number
-	readonly factor?: number
-	readonly choices?: EnumChoice[]
 	// Un-scaled, pre-enum-label value, kept current for adjust/toggle.
 	latestRaw: Types.EmberValue | undefined
 }
-
-export interface ControlSummary {
-	id: string
-	name: string
-	group?: ControlGroup
-	choices?: EnumChoice[]
-	category?: string
-}
-
-// Action-facing: writable controllable parameters only, grouped by kind.
-export interface ControlDescriptors {
-	numbers: ControlSummary[]
-	booleans: ControlSummary[]
-	enums: ControlSummary[]
-}
-
-// Feedback-facing: every classified parameter, writable or read-only, grouped by kind.
-export interface PropertyDescriptors {
-	numbers: ControlSummary[]
-	booleans: ControlSummary[]
-	enums: ControlSummary[]
-	strings: ControlSummary[]
-}
-
-const RECONNECT_INTERVAL_MS = 5000
-
-// Max Ember+ requests in flight at once while populating variables on connect.
-const POPULATE_CONCURRENCY = 40
 
 // Run `worker` over `items` with at most `limit` promises in flight at a time.
 async function runPool<T>(items: readonly T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
@@ -73,8 +36,10 @@ export class ForaApi {
 	readonly #self: ModuleInstance
 	#client: EmberClient | null = null
 	#reconnectTimer: NodeJS.Timeout | null = null
+	#heartbeatTimer: NodeJS.Timeout | null = null
 	#destroyed = false
-	readonly #controls = new Map<string, ControlEntry>()
+	// Parameters this unit actually carries, resolved on the current connection.
+	readonly #live = new Map<string, LiveParameter>()
 
 	constructor(self: ModuleInstance) {
 		this.#self = self
@@ -91,11 +56,10 @@ export class ForaApi {
 		}
 
 		const spec = getModelSpec(model)
-		const port = spec.port
-		this.#self.log('debug', `Connecting to ${spec.label} at ${host}:${port}`)
+		this.#self.log('debug', `Connecting to ${spec.label} at ${host}:${spec.port}`)
 		this.#self.updateStatus(InstanceStatus.Connecting)
 
-		const client = new EmberClient(host, port)
+		const client = new EmberClient(host, spec.port, REQUEST_TIMEOUT_MS)
 		this.#client = client
 
 		client.on('disconnected', () => this.#handleDrop('Disconnected'))
@@ -114,14 +78,14 @@ export class ForaApi {
 		}
 		if (this.#client !== client) return // superseded by a newer connect()/teardown
 
-		this.#self.log('info', `Connected to ${spec.label} at ${host}:${port}, verifying identity`)
+		this.#self.log('info', `Connected to ${spec.label} at ${host}:${spec.port}, verifying identity`)
 		await this.#verifyIdentity(client, spec)
 	}
 
 	async #verifyIdentity(client: EmberClient, spec: ModelSpec): Promise<void> {
 		let deviceId: string | undefined
 		try {
-			deviceId = await this.#readDeviceId(client)
+			deviceId = await this.#readDeviceId(client, spec)
 		} catch (error) {
 			// A failed read is treated as a transient connection problem.
 			this.#handleDrop(error instanceof Error ? error.message : String(error))
@@ -131,7 +95,7 @@ export class ForaApi {
 		if (this.#client !== client) return // superseded while awaiting
 
 		if (deviceId === undefined) {
-			this.#handleDrop(`Could not read device identity at "${DEVICE_ID_PATH}"`)
+			this.#handleDrop(`Could not read device identity from ${describeIdentitySource(spec.identity)}`)
 			return
 		}
 
@@ -148,266 +112,199 @@ export class ForaApi {
 		this.#self.log('info', `Identity confirmed: ${deviceId}`)
 		this.#self.updateStatus(InstanceStatus.Ok)
 
-		await this.#populateVariables(client)
+		this.#startHeartbeat(client)
+		await this.#seedValues(client)
 	}
 
-	async #populateVariables(client: EmberClient): Promise<void> {
-		const groups = groupByParent(this.#self.definitions)
-		this.#controls.clear()
-
+	// Reads every declared parameter, then subscribes. Actions, feedbacks and variables already
+	// exist at this point — this only fills them in.
+	async #seedValues(client: EmberClient): Promise<void> {
+		this.#live.clear()
 		const started = Date.now()
-		await this.#loadDirectories(client, [...groups.keys()])
-		if (this.#client !== client) return
 
-		await this.#seedAndSubscribe(client, groups)
-		if (this.#client !== client) return
+		const absentByKey = new Map<string, { count: number; sample: string }>()
+		const groups: Map<string, ParentGroupMember[]> = groupByParent(this.#self.definitions)
 
-		this.#self.log('debug', `Variable population took ${Date.now() - started}ms`)
-		// Rebuild actions/feedbacks/presets now that parameter types, ranges and enum choices are known.
-		this.#self.updateActions()
-		this.#self.updateFeedbacks()
-		this.#self.updatePresets()
-	}
-
-	async #loadDirectories(client: EmberClient, parentPaths: readonly string[]): Promise<void> {
-		const byDepth = new Map<number, Set<string>>()
-		for (const parentPath of parentPaths) {
-			const segments = parentPath.split(PATH_DELIMITER)
-			for (let depth = 1; depth <= segments.length; depth++) {
-				const prefix = segments.slice(0, depth).join(PATH_DELIMITER)
-				const level = byDepth.get(depth) ?? new Set<string>()
-				level.add(prefix)
-				byDepth.set(depth, level)
-			}
-		}
-
-		for (const depth of [...byDepth.keys()].sort((a, b) => a - b)) {
-			if (this.#client !== client) return
-			await runPool([...byDepth.get(depth)!], POPULATE_CONCURRENCY, async (path) => {
-				try {
-					const node = await client.getElementByPath(path, undefined, PATH_DELIMITER)
-					if (node?.contents.type === Model.ElementType.Node) {
-						await (
-							await client.getDirectory(node as Model.NumberedTreeNode<Model.EmberElement>)
-						).response
-					}
-				} catch (error) {
-					this.#self.log(
-						'debug',
-						`Directory "${path}" not loaded: ${error instanceof Error ? error.message : String(error)}`,
-					)
-				}
-			})
-		}
-	}
-
-	async #seedAndSubscribe(client: EmberClient, groups: Map<string, ParentGroupMember[]>): Promise<void> {
-		const leaves: { def: VariableDefinition; node: Model.NumberedTreeNode<Model.EmberElement> }[] = []
-
-		for (const [parentPath, members] of groups) {
-			let parent: Model.TreeElement<Model.EmberElement> | undefined
-			try {
-				parent = await client.getElementByPath(parentPath, undefined, PATH_DELIMITER)
-			} catch {
-				parent = undefined // path doesn't exist (config-dependent subtree); members skipped below
-			}
-			const children = parent?.children ? Object.values(parent.children) : []
-
-			for (const { leaf, def } of members) {
-				const node = children.find((child) => 'identifier' in child.contents && child.contents.identifier === leaf)
-				if (node?.contents.type !== Model.ElementType.Parameter) {
-					// Absent leaves are expected here: some subtrees are config-dependent
-					// (e.g. fs-2 `uhd` when not in UHD mode). The variable just stays blank.
-					this.#self.log('debug', `"${def.path}" absent; ${def.id} left blank`)
-					continue
-				}
-				this.#self.state.set(def.id, formatParameterValue(node.contents))
-				this.#registerControl(def, node as Model.NumberedTreeNode<Model.Parameter>)
-				leaves.push({ def, node: node })
-			}
-		}
-
-		this.#self.log(
-			'info',
-			`Seeded ${leaves.length}/${this.#self.definitions.length} variables; subscribing for updates`,
+		const stats = await walkDefinitions(
+			client,
+			groups,
+			{ concurrency: POPULATE_CONCURRENCY, maxAttempts: WALK_MAX_ATTEMPTS },
+			{
+				onParameter: (def, node) => {
+					this.#self.state.set(def.id, formatValue(def.control, node.contents.value))
+					this.#live.set(def.id, { def, node, latestRaw: node.contents.value })
+				},
+				// Expected: subtrees are config-dependent and option blocks may be unfitted. The
+				// action stays in the UI either way; setting one that isn't there just warns.
+				onAbsent: (def) => {
+					const key = def.group?.key ?? def.id
+					const tally = absentByKey.get(key) ?? { count: 0, sample: def.path }
+					tally.count++
+					absentByKey.set(key, tally)
+				},
+				isCancelled: () => this.#client !== client,
+				log: (level, message) => this.#self.log(level, message),
+			},
 		)
 
-		await runPool(leaves, POPULATE_CONCURRENCY, async ({ def, node }) => {
+		if (this.#client !== client) return
+
+		let absentTotal = 0
+		for (const [key, { count, sample }] of [...absentByKey].sort((a, b) => b[1].count - a[1].count)) {
+			absentTotal += count
+			this.#self.log('debug', `${key}: ${count} absent on this unit (e.g. "${sample}")`)
+		}
+		this.#self.log(
+			'debug',
+			`Loaded ${stats.requested} directories in ${Date.now() - started}ms; pruned ${stats.pruned} under ` +
+				`absent parents, retried ${stats.retried}, gave up on ${stats.failed}`,
+		)
+		this.#self.log(
+			'info',
+			`Seeded ${this.#live.size}/${this.#self.definitions.length} parameters (${absentTotal} absent on this unit)`,
+		)
+
+		// One request per parameter, so it runs after every value is already current as of its read.
+		await this.#subscribeAll(client)
+	}
+
+	async #subscribeAll(client: EmberClient): Promise<void> {
+		await runPool([...this.#live.values()], POPULATE_CONCURRENCY, async (live) => {
 			try {
-				await client.subscribe(node, (updated) => {
+				await client.subscribe(live.node, (updated) => {
 					if (this.#client !== client) return // stale update from a superseded client
-					if (updated.contents.type === Model.ElementType.Parameter) {
-						this.#self.state.set(def.id, formatParameterValue(updated.contents))
-						const control = this.#controls.get(def.id)
-						if (control) control.latestRaw = updated.contents.value
-					}
+					if (updated.contents.type !== Model.ElementType.Parameter) return
+					live.latestRaw = updated.contents.value
+					this.#self.state.set(live.def.id, formatValue(live.def.control, updated.contents.value))
 				})
 			} catch (error) {
 				this.#self.log(
 					'warn',
-					`Failed to subscribe to "${def.path}": ${error instanceof Error ? error.message : String(error)}`,
+					`Failed to subscribe to "${live.def.path}": ${error instanceof Error ? error.message : String(error)}`,
 				)
 			}
 		})
 	}
 
-	// Non-controllable types (trigger, octets, null) are ignored entirely.
-	#registerControl(def: VariableDefinition, node: Model.NumberedTreeNode<Model.Parameter>): void {
-		const parameter = node.contents
-		const kind = classifyParameter(parameter)
-		if (!kind) return
-
-		this.#controls.set(def.id, {
-			def,
-			node,
-			kind,
-			parameterType: parameter.parameterType,
-			writable:
-				parameter.access === Model.ParameterAccess.Write || parameter.access === Model.ParameterAccess.ReadWrite,
-			min: parameter.minimum ?? undefined,
-			max: parameter.maximum ?? undefined,
-			factor: parameter.factor,
-			choices: kind === 'enum' ? enumChoices(parameter) : undefined,
-			latestRaw: parameter.value,
-		})
-	}
-
-	describeControls(): ControlDescriptors {
-		const descriptors: ControlDescriptors = { numbers: [], booleans: [], enums: [] }
-		for (const control of this.#controls.values()) {
-			if (!control.writable) continue
-			const summary: ControlSummary = {
-				id: control.def.id,
-				name: control.def.name,
-				group: control.def.group,
-				category: control.def.category,
-			}
-			if (control.kind === 'number') {
-				descriptors.numbers.push(summary)
-			} else if (control.kind === 'boolean') {
-				descriptors.booleans.push(summary)
-			} else if (control.kind === 'enum') {
-				descriptors.enums.push({ ...summary, choices: control.choices ?? [] })
-			}
-		}
-		const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name)
-		descriptors.numbers.sort(byName)
-		descriptors.booleans.sort(byName)
-		descriptors.enums.sort(byName)
-		return descriptors
-	}
-
-	describeAllProperties(): PropertyDescriptors {
-		const descriptors: PropertyDescriptors = { numbers: [], booleans: [], enums: [], strings: [] }
-		for (const control of this.#controls.values()) {
-			const summary: ControlSummary = {
-				id: control.def.id,
-				name: control.def.name,
-				group: control.def.group,
-				category: control.def.category,
-			}
-			if (control.kind === 'number') {
-				descriptors.numbers.push(summary)
-			} else if (control.kind === 'boolean') {
-				descriptors.booleans.push(summary)
-			} else if (control.kind === 'enum') {
-				descriptors.enums.push({ ...summary, choices: control.choices ?? [] })
-			} else {
-				descriptors.strings.push(summary)
-			}
-		}
-		const byName = (a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name)
-		descriptors.numbers.sort(byName)
-		descriptors.booleans.sort(byName)
-		descriptors.enums.sort(byName)
-		descriptors.strings.sort(byName)
-		return descriptors
-	}
-
 	// `display` is in display units; scaled by `factor` and clamped before writing.
 	async setNumber(id: string, display: number): Promise<void> {
-		const control = this.#numberControl(id)
-		if (!control) return
-		await this.#writeNumber(control, display * this.#factor(control))
+		const found = this.#writable(id, 'number')
+		if (!found) return
+		const [live, spec] = found
+		await this.#writeNumber(live, spec, display * spec.factor)
 	}
 
 	async adjustNumber(id: string, deltaDisplay: number): Promise<void> {
-		const control = this.#numberControl(id)
-		if (!control) return
-		const current = typeof control.latestRaw === 'number' ? control.latestRaw : 0
-		await this.#writeNumber(control, current + deltaDisplay * this.#factor(control))
+		const found = this.#writable(id, 'number')
+		if (!found) return
+		const [live, spec] = found
+		const current = typeof live.latestRaw === 'number' ? live.latestRaw : 0
+		await this.#writeNumber(live, spec, current + deltaDisplay * spec.factor)
 	}
 
 	async setBoolean(id: string, mode: 'on' | 'off' | 'toggle'): Promise<void> {
-		const control = this.#controls.get(id)
-		if (control?.kind !== 'boolean' || !control.writable) return this.#warnNoControl(id, 'boolean')
-		const value = mode === 'toggle' ? control.latestRaw !== true : mode === 'on'
-		await this.#write(control, value)
+		const found = this.#writable(id, 'boolean')
+		if (!found) return
+		const [live] = found
+		await this.#write(live, mode === 'toggle' ? live.latestRaw !== true : mode === 'on')
 	}
 
 	async setEnum(id: string, index: number): Promise<void> {
-		const control = this.#controls.get(id)
-		if (control?.kind !== 'enum' || !control.writable) return this.#warnNoControl(id, 'enum')
-		await this.#write(control, index)
+		const found = this.#writable(id, 'enum')
+		if (!found) return
+		await this.#write(found[0], index)
 	}
 
-	#numberControl(id: string): ControlEntry | undefined {
-		const control = this.#controls.get(id)
-		if (control?.kind !== 'number' || !control.writable) {
-			this.#warnNoControl(id, 'number')
+	async setString(id: string, value: string): Promise<void> {
+		const found = this.#writable(id, 'string')
+		if (!found) return
+		await this.#write(found[0], value)
+	}
+
+	// The tables cover every parameter a model can carry, but a unit populates only a subset — an
+	// action can legitimately target something this unit doesn't have.
+	#writable<K extends ControlSpec['kind']>(
+		id: string,
+		kind: K,
+	): [LiveParameter, Extract<ControlSpec, { kind: K }>] | undefined {
+		const live = this.#live.get(id)
+		if (!live) {
+			this.#self.log('warn', `Cannot set "${id}": not present on this unit, or not connected`)
 			return undefined
 		}
-		return control
+		const spec = live.def.control
+		if (spec.kind !== kind || !isWritable(spec)) {
+			this.#self.log('warn', `Cannot set "${id}": not a writable ${kind}`)
+			return undefined
+		}
+		return [live, spec as Extract<ControlSpec, { kind: K }>]
 	}
 
-	#factor(control: ControlEntry): number {
-		return control.factor && control.factor !== 0 ? control.factor : 1
+	// Round (unless the device reports a fractional type), clamp to the raw bounds, then write.
+	async #writeNumber(live: LiveParameter, spec: Extract<ControlSpec, { kind: 'number' }>, raw: number): Promise<void> {
+		const rounded = live.node.contents.parameterType === Model.ParameterType.Real ? raw : Math.round(raw)
+		await this.#write(live, Math.min(Math.max(rounded, spec.min), spec.max))
 	}
 
-	// Round (unless Real), clamp to the parameter's raw min/max, then write.
-	async #writeNumber(control: ControlEntry, rawValue: number): Promise<void> {
-		let raw = control.parameterType === Model.ParameterType.Real ? rawValue : Math.round(rawValue)
-		if (typeof control.min === 'number') raw = Math.max(raw, control.min)
-		if (typeof control.max === 'number') raw = Math.min(raw, control.max)
-		await this.#write(control, raw)
-	}
-
-	async #write(control: ControlEntry, value: Types.EmberValue): Promise<void> {
+	async #write(live: LiveParameter, value: Types.EmberValue): Promise<void> {
 		const client = this.#client
 		if (!client) {
-			this.#self.log('warn', `Cannot set ${control.def.id}: not connected`)
+			this.#self.log('warn', `Cannot set ${live.def.id}: not connected`)
 			return
 		}
 		try {
-			await client.setValue(control.node, value)
+			const request = await client.setValue(live.node, value)
+			// The acknowledgement is a second promise, and an unhandled rejection from it would kill
+			// the module process. Not awaited — the subscription already carries the value back.
+			request.response?.catch((error: unknown) => {
+				this.#self.log(
+					'debug',
+					`No acknowledgement for ${live.def.id}: ${error instanceof Error ? error.message : String(error)}`,
+				)
+			})
 		} catch (error) {
-			this.#self.log(
-				'warn',
-				`Failed to set ${control.def.id}: ${error instanceof Error ? error.message : String(error)}`,
-			)
+			this.#self.log('warn', `Failed to set ${live.def.id}: ${error instanceof Error ? error.message : String(error)}`)
 		}
 	}
 
-	#warnNoControl(id: string, expected: ControlKind): void {
-		this.#self.log('warn', `No ${expected} control for "${id}" (unknown, read-only, or not yet connected)`)
-	}
+	// `getElementByPath` only matches nodes already in `client.tree`, so the root has to be loaded
+	// first or the first path segment fails to match and it silently returns undefined.
+	async #readDeviceId(client: EmberClient, spec: ModelSpec): Promise<string | undefined> {
+		await (
+			await client.getDirectory(client.tree)
+		).response
 
-	async #readDeviceId(client: EmberClient): Promise<string | undefined> {
-		const rootReq = await client.getDirectory(client.tree)
-		await rootReq.response
-
-		const node = await client.getElementByPath(DEVICE_ID_PATH)
+		const node = await client.getElementByPath(
+			spec.identity.kind === 'parameter' ? spec.identity.path : spec.identity.root,
+			undefined,
+			PATH_DELIMITER,
+		)
 		const contents = node?.contents
-		if (contents?.type !== Model.ElementType.Parameter) return undefined
+		if (!contents) return undefined
 
-		const value = contents.value
-		return value === undefined || value === null ? undefined : String(value).trim()
+		const raw =
+			spec.identity.kind === 'parameter'
+				? contents.type === Model.ElementType.Parameter
+					? contents.value
+					: undefined
+				: contents.type === Model.ElementType.Node
+					? contents.description
+					: undefined
+
+		return raw === undefined || raw === null ? undefined : String(raw).trim()
 	}
 
 	#handleDrop(reason: string): void {
 		if (this.#destroyed) return
+		// `error` and `disconnected` both fire for one failure. Detach immediately so repeats are
+		// ignored and an in-flight walk cancels instead of grinding on against a dead socket.
+		const client = this.#client
+		this.#client = null
+		if (!client) return
+
 		this.#self.log('warn', `Connection lost: ${reason}`)
-		this.#controls.clear()
+		void this.#disposeClient(client)
+		this.#live.clear()
 		this.#self.state.clear()
 		this.#self.updateStatus(InstanceStatus.ConnectionFailure, reason)
 		this.#scheduleReconnect()
@@ -431,7 +328,44 @@ export class ForaApi {
 		const client = this.#client
 		this.#client = null
 		if (!client) return
+		await this.#disposeClient(client)
+	}
 
+	// Polls so the device's inactivity timer keeps getting reset. Unconditional rather than "only
+	// when idle": one small request is noise next to the walk, and tracking activity is error-prone.
+	#startHeartbeat(client: EmberClient): void {
+		this.#stopHeartbeat()
+		this.#heartbeatTimer = setInterval(() => {
+			if (this.#client !== client) return
+			void this.#sendHeartbeat(client)
+		}, HEARTBEAT_INTERVAL_MS)
+	}
+
+	async #sendHeartbeat(client: EmberClient): Promise<void> {
+		// A top-level node, not `client.tree`: an unqualified root getDirectory only resolves while
+		// the tree is empty. The device answers either way, but only this form confirms it did.
+		const target = client.tree[0]
+		if (!target) return
+
+		try {
+			// Await the response, not just the send: an unhandled rejection here would be fatal.
+			await (
+				await client.getDirectory(target)
+			).response
+		} catch (error) {
+			if (this.#client !== client) return
+			this.#self.log('debug', `Heartbeat failed: ${error instanceof Error ? error.message : String(error)}`)
+		}
+	}
+
+	#stopHeartbeat(): void {
+		if (!this.#heartbeatTimer) return
+		clearInterval(this.#heartbeatTimer)
+		this.#heartbeatTimer = null
+	}
+
+	async #disposeClient(client: EmberClient): Promise<void> {
+		this.#stopHeartbeat()
 		client.removeAllListeners()
 		try {
 			await client.disconnect()

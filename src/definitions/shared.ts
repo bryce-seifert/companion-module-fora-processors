@@ -1,8 +1,10 @@
 import type { CompanionVariableValue } from '@companion-module/base'
-import { Model } from 'emberplus-connection'
+import type { ControlSpec } from './controls.js'
 
-// An Ember+ parameter mirrored into a Companion variable. `path` is `/`-delimited.
-export interface VariableDefinition {
+// An Ember+ parameter before its control metadata has been attached. The model tables are
+// written in this form: they say what a parameter is called and where it lives, and the
+// matching `*-controls.ts` table says what it accepts.
+export interface DefinitionDraft {
 	readonly id: string
 	readonly name: string
 	readonly path: string
@@ -10,6 +12,33 @@ export interface VariableDefinition {
 	readonly group?: ControlGroup
 	// Functions.csv "Category" column; prefixed onto the action name for grouping in the UI.
 	readonly category?: string
+	// Set only where instances sharing a control key genuinely differ (see fa1616 `input_select`).
+	readonly control?: ControlSpec
+}
+
+// An Ember+ parameter mirrored into a Companion variable. `path` is `/`-delimited.
+export interface VariableDefinition extends DefinitionDraft {
+	readonly control: ControlSpec
+}
+
+// Instances of a parameter share one spec, so the control tables are keyed by group key —
+// or by id for the handful of parameters that aren't grouped.
+export function controlKey(draft: DefinitionDraft): string {
+	return draft.group?.key ?? draft.id
+}
+
+// Resolves each draft's spec from `table`. A draft that already carries its own `control` keeps
+// it. A missing key is a bug in the tables rather than a device condition, so it throws rather
+// than silently dropping the parameter from the UI.
+export function attachControls(
+	drafts: readonly DefinitionDraft[],
+	table: Record<string, ControlSpec>,
+): VariableDefinition[] {
+	return drafts.map((draft) => {
+		const control = draft.control ?? table[controlKey(draft)]
+		if (!control) throw new Error(`No control spec for "${controlKey(draft)}" (definition "${draft.id}")`)
+		return { ...draft, control }
+	})
 }
 
 // Functions.csv "Category" column values, shared by both models' definition tables.
@@ -76,76 +105,20 @@ export function groupByParent(definitions: readonly VariableDefinition[]): Map<s
 	return groups
 }
 
-// Enum parameters report a 0-based index mapped back to its label; `factor` parameters report a
-// scaled integer divided back down for display.
-export function formatParameterValue(parameter: Model.Parameter): CompanionVariableValue | undefined {
-	const { value } = parameter
+// Turns a raw device value into what the Companion variable shows: enums display their label,
+// scaled numbers are divided back down. Driven entirely by the definition's spec, so the same
+// formatting applies whether the value came from the initial read or a subscription update.
+export function formatValue(spec: ControlSpec, value: unknown): CompanionVariableValue | undefined {
 	if (value === undefined || value === null) return undefined
 
-	if (typeof value === 'number') {
-		const label = enumLabel(parameter, value)
-		if (label !== undefined) return label
-		if (parameter.factor) return value / parameter.factor
+	if (spec.kind === 'enum' && typeof value === 'number') {
+		return spec.choices.find((choice) => choice.id === value)?.label ?? value
+	}
+	if (spec.kind === 'number' && typeof value === 'number') {
+		return spec.factor === 1 ? value : value / spec.factor
 	}
 
 	if (Buffer.isBuffer(value)) return value.toString('hex')
-	return value
-}
-
-function enumLabel(parameter: Model.Parameter, index: number): string | undefined {
-	if (parameter.enumMap) {
-		for (const [label, mapped] of parameter.enumMap) {
-			if (mapped === index) return label
-		}
-	}
-	if (parameter.enumeration) {
-		const label = parameter.enumeration.split('\n')[index]
-		if (label !== undefined) return label
-	}
-	return undefined
-}
-
-export type ControlKind = 'number' | 'boolean' | 'enum' | 'string'
-
-export interface EnumChoice {
-	readonly id: number
-	readonly label: string
-}
-
-// Independent of read/write access — read-only status parameters get a kind too, so they can
-// drive feedbacks even though they never become actions. Enums take priority over the underlying integer type.
-export function classifyParameter(parameter: Model.Parameter): ControlKind | undefined {
-	if (parameter.enumeration || parameter.enumMap) return 'enum'
-	switch (parameter.parameterType) {
-		case Model.ParameterType.Boolean:
-			return 'boolean'
-		case Model.ParameterType.Integer:
-		case Model.ParameterType.Real:
-			return 'number'
-		case Model.ParameterType.String:
-			return 'string'
-		default:
-			return undefined // trigger, octets, null
-	}
-}
-
-// The device uses a bare "~" as a placeholder for unused/reserved enum slots; never a real choice.
-const isPlaceholderChoice = (label: string): boolean => label.trim() === '~'
-
-// Placeholder slots are filtered but original indices are kept as ids, so the remaining
-// choices still map back to the correct device value.
-export function enumChoices(parameter: Model.Parameter): EnumChoice[] {
-	if (parameter.enumMap) {
-		return [...parameter.enumMap.entries()]
-			.map(([label, id]) => ({ id, label }))
-			.filter((choice) => !isPlaceholderChoice(choice.label))
-			.sort((a, b) => a.id - b.id)
-	}
-	if (parameter.enumeration) {
-		return parameter.enumeration
-			.split('\n')
-			.map((label, id) => ({ id, label }))
-			.filter((choice) => !isPlaceholderChoice(choice.label))
-	}
-	return []
+	if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value
+	return undefined // Ember+ carries nothing else; anything left has no sensible display form.
 }

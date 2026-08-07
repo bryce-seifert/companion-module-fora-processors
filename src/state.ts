@@ -1,21 +1,18 @@
 import type { CompanionVariableValue, CompanionVariableValues } from '@companion-module/base'
-import type { ModuleInstance } from './main.js'
-import type { ModelId } from './models.js'
 import { buildFa1616Definitions } from './definitions/fa1616.js'
 import { buildFa9600Definitions } from './definitions/fa9600.js'
 import type { VariableDefinition, VariableId } from './definitions/shared.js'
+import type { ModuleInstance } from './main.js'
+import type { ModelId } from './models.js'
 
 // Re-export the shared definition API so the rest of the module keeps a single import site.
 export {
-	classifyParameter,
-	enumChoices,
-	formatParameterValue,
+	controlKey,
+	formatValue,
 	groupByParent,
 	PATH_DELIMITER,
 	type ControlGroup,
-	type ControlKind,
 	type DeviceState,
-	type EnumChoice,
 	type GroupSelector,
 	type ParentGroupMember,
 	type VariableDefinition,

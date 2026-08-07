@@ -1,16 +1,27 @@
-import { CATEGORY, cap, pad, range, type ControlGroup, type GroupSelector, type VariableDefinition } from './shared.js'
+import { FA9600_CONTROLS } from './fa9600-controls.js'
+import {
+	attachControls,
+	CATEGORY,
+	cap,
+	pad,
+	range,
+	type ControlGroup,
+	type DefinitionDraft,
+	type GroupSelector,
+	type VariableDefinition,
+} from './shared.js'
 
 // FA-9600 definition table. Paths mirror the v3.90+ tree; the device exposes two Ember+
 // roots — `processor` (identity) and `root` (data).
 
-function fsDefinitions(n: 1 | 2): VariableDefinition[] {
+function fsDefinitions(n: 1 | 2): DefinitionDraft[] {
 	const fs = `fs${n}`
 	const label = `FS${n}`
 	const base = `root/video/fs-${n}`
 	const sync = `${base}/synchronizer`
 	const cp = `${base}/color-processor`
 	const lut1d = `${cp}/gamma-color/lut-1d-color`
-	const defs: VariableDefinition[] = []
+	const defs: DefinitionDraft[] = []
 	// Every FS parameter collapses into a single action with a Frame Sync selector; the
 	// group key/name are the id/name with their `fs1_`/`FS1 ` prefix stripped.
 	const add = (id: string, name: string, path: string, category: string) =>
@@ -48,8 +59,7 @@ function fsDefinitions(n: 1 | 2): VariableDefinition[] {
 	add(`${fs}_freeze_mode`, `${label} Video Freeze Mode`, `${sync}/video-freeze/mode`, CATEGORY.UTILITIES)
 	add(`${fs}_uhd_input_link`, `${label} Input Link (4KFS/Workflow)`, `${sync}/uhd/input-link`, CATEGORY.FS_LINKING)
 
-	// Names below follow the Functions.csv "Item" column so actions read as complete labels
-	// rather than internal node abbreviations (Pre-Amp, Bal, Diff, LUT In/Out, Knee…).
+	// Specific names to ensure actions read as complete labels, not abbreviations.
 	const LEVEL_NAME: Record<string, string> = {
 		video: 'Video Level',
 		y: 'Y Level',
@@ -136,8 +146,7 @@ function fsDefinitions(n: 1 | 2): VariableDefinition[] {
 	add(`${fs}_lut_in_gamma`, `${label} Input Gamma (EOTF)`, `${lut1d}/in-gamma`, CATEGORY.HDR_COLOR_SPACE)
 	add(`${fs}_lut_out_gamma`, `${label} Output Gamma (OETF)`, `${lut1d}/out-gamma`, CATEGORY.HDR_COLOR_SPACE)
 
-	// Color processor — LUT label name tables. gamma-label has 13 slot nodes but only
-	// label-01..10 carry a `name` parameter; 11..13 are empty slots (confirmed on hardware).
+	// Color processor — LUT label name tables.
 	for (const i of range(1, 10)) {
 		add(
 			`${fs}_gamma_label_${pad(i, 2)}`,
@@ -154,12 +163,10 @@ function fsDefinitions(n: 1 | 2): VariableDefinition[] {
 			CATEGORY.METADATA_LABELING,
 		)
 	}
-	// No lut-3d label table: the device doesn't expose a `lut-3d/lut-3d-label` node (confirmed on hardware).
-
 	return defs
 }
 
-function statusDefinitions(): VariableDefinition[] {
+function statusDefinitions(): DefinitionDraft[] {
 	const status = 'root/video/common/status'
 	return [
 		{
@@ -186,8 +193,8 @@ function statusDefinitions(): VariableDefinition[] {
 const embSelector = (e: number): GroupSelector => ({ dim: 'emb', value: String(e), label: `Emb ${e}` })
 const chSelector = (ch: number): GroupSelector => ({ dim: 'ch', value: pad(ch, 2), label: `Ch ${pad(ch, 2)}` })
 
-function audioDefinitions(): VariableDefinition[] {
-	const defs: VariableDefinition[] = []
+function audioDefinitions(): DefinitionDraft[] {
+	const defs: DefinitionDraft[] = []
 	const add = (id: string, name: string, path: string, category: string, group?: ControlGroup) =>
 		defs.push({ id, name, path, category, group })
 
@@ -239,7 +246,7 @@ function audioDefinitions(): VariableDefinition[] {
 	return defs
 }
 
-function eventDefinitions(): VariableDefinition[] {
+function eventDefinitions(): DefinitionDraft[] {
 	return range(0, 100).map((i) => ({
 		id: `event_${pad(i, 3)}`,
 		name: `Event ${pad(i, 3)} - Name`,
@@ -250,7 +257,7 @@ function eventDefinitions(): VariableDefinition[] {
 
 // Primary load/save are Ember+ Functions this module doesn't invoke; alt-event-load/save are
 // the Write-Only "alternative" parameters the device provides for that case.
-function eventControlDefinitions(): VariableDefinition[] {
+function eventControlDefinitions(): DefinitionDraft[] {
 	const event = 'root/other/event'
 	return [
 		{ id: 'event_load', name: 'Load Event (Number)', path: `${event}/alt-event-load`, category: CATEGORY.EVENT_MEMORY },
@@ -260,12 +267,15 @@ function eventControlDefinitions(): VariableDefinition[] {
 }
 
 export function buildFa9600Definitions(): VariableDefinition[] {
-	return [
-		...fsDefinitions(1),
-		...fsDefinitions(2),
-		...statusDefinitions(),
-		...audioDefinitions(),
-		...eventDefinitions(),
-		...eventControlDefinitions(),
-	]
+	return attachControls(
+		[
+			...fsDefinitions(1),
+			...fsDefinitions(2),
+			...statusDefinitions(),
+			...audioDefinitions(),
+			...eventDefinitions(),
+			...eventControlDefinitions(),
+		],
+		FA9600_CONTROLS,
+	)
 }

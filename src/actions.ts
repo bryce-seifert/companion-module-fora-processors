@@ -1,76 +1,95 @@
 import type { CompanionActionDefinitions } from '@companion-module/base'
-import { ID_PREFIX, toLogical, selectorFields, resolveId } from './logical-controls.js'
+import { isWritable } from './definitions/controls.js'
+import { actionId, resolveId, selectorFields } from './logical-controls.js'
 import type { ModuleInstance } from './main.js'
 
 const NUMBER_LIMIT = 1_000_000_000
 
-// Instances of the same logical parameter (FS1/FS2, channels 1-32...) collapse into one action with a selector dropdown per dimension.
+// One action per writable logical control. Read-only parameters (status, latency, labels) still
+// become variables and feedbacks, but there is nothing to set on them.
 export function UpdateActions(self: ModuleInstance): void {
-	const { numbers, booleans, enums } = self.api.describeControls()
 	const actions: CompanionActionDefinitions = {}
 
-	for (const logical of toLogical(numbers, ID_PREFIX.number.action)) {
-		actions[logical.id] = {
-			name: logical.displayName,
-			options: [
-				...selectorFields(logical),
-				{
-					type: 'dropdown',
-					id: 'mode',
-					label: 'Operation',
-					default: 'set',
-					choices: [
-						{ id: 'set', label: 'Set' },
-						{ id: 'increase', label: 'Increase' },
-						{ id: 'decrease', label: 'Decrease' },
-					],
-				},
-				{ type: 'number', id: 'value', label: 'Value', default: 0, min: -NUMBER_LIMIT, max: NUMBER_LIMIT },
-			],
-			callback: async (event) => {
-				const id = resolveId(logical, event.options)
-				const value = Number(event.options.value)
-				if (event.options.mode === 'increase') await self.api.adjustNumber(id, value)
-				else if (event.options.mode === 'decrease') await self.api.adjustNumber(id, -value)
-				else await self.api.setNumber(id, value)
-			},
-		}
-	}
+	for (const logical of self.logicalControls) {
+		const { spec } = logical
+		if (!isWritable(spec)) continue
+		const selectors = selectorFields(logical)
 
-	for (const logical of toLogical(booleans, ID_PREFIX.boolean.action)) {
-		actions[logical.id] = {
-			name: logical.displayName,
-			options: [
-				...selectorFields(logical),
-				{
-					type: 'dropdown',
-					id: 'mode',
-					label: 'Action',
-					default: 'toggle',
-					choices: [
-						{ id: 'on', label: 'On' },
-						{ id: 'off', label: 'Off' },
-						{ id: 'toggle', label: 'Toggle' },
-					],
+		if (spec.kind === 'number') {
+			const unit = spec.unit ? ` (${spec.unit})` : ''
+			actions[actionId(logical)] = {
+				name: logical.displayName,
+				options: [
+					...selectors,
+					{
+						type: 'dropdown',
+						id: 'mode',
+						label: 'Operation',
+						default: 'set',
+						choices: [
+							{ id: 'set', label: 'Set' },
+							{ id: 'increase', label: 'Increase' },
+							{ id: 'decrease', label: 'Decrease' },
+						],
+					},
+					{
+						type: 'number',
+						id: 'value',
+						label: `Value${unit}`,
+						default: 0,
+						min: -NUMBER_LIMIT,
+						max: NUMBER_LIMIT,
+					},
+				],
+				callback: async (event) => {
+					const id = resolveId(logical, event.options)
+					const value = Number(event.options.value)
+					if (event.options.mode === 'increase') await self.api.adjustNumber(id, value)
+					else if (event.options.mode === 'decrease') await self.api.adjustNumber(id, -value)
+					else await self.api.setNumber(id, value)
 				},
-			],
-			callback: async (event) => {
-				await self.api.setBoolean(resolveId(logical, event.options), event.options.mode as 'on' | 'off' | 'toggle')
-			},
-		}
-	}
-
-	for (const logical of toLogical(enums, ID_PREFIX.enum.action)) {
-		const choices = (logical.choices ?? []).map((choice) => ({ id: choice.id, label: choice.label }))
-		actions[logical.id] = {
-			name: logical.displayName,
-			options: [
-				...selectorFields(logical),
-				{ type: 'dropdown', id: 'value', label: logical.name, default: choices[0]?.id ?? 0, choices },
-			],
-			callback: async (event) => {
-				await self.api.setEnum(resolveId(logical, event.options), Number(event.options.value))
-			},
+			}
+		} else if (spec.kind === 'boolean') {
+			actions[actionId(logical)] = {
+				name: logical.displayName,
+				options: [
+					...selectors,
+					{
+						type: 'dropdown',
+						id: 'mode',
+						label: 'Action',
+						default: 'toggle',
+						choices: [
+							{ id: 'on', label: 'On' },
+							{ id: 'off', label: 'Off' },
+							{ id: 'toggle', label: 'Toggle' },
+						],
+					},
+				],
+				callback: async (event) => {
+					await self.api.setBoolean(resolveId(logical, event.options), event.options.mode as 'on' | 'off' | 'toggle')
+				},
+			}
+		} else if (spec.kind === 'enum') {
+			const choices = spec.choices.map((choice) => ({ id: choice.id, label: choice.label }))
+			actions[actionId(logical)] = {
+				name: logical.displayName,
+				options: [
+					...selectors,
+					{ type: 'dropdown', id: 'value', label: logical.name, default: choices[0]?.id ?? 0, choices },
+				],
+				callback: async (event) => {
+					await self.api.setEnum(resolveId(logical, event.options), Number(event.options.value))
+				},
+			}
+		} else {
+			actions[actionId(logical)] = {
+				name: logical.displayName,
+				options: [...selectors, { type: 'textinput', id: 'value', label: logical.name, default: '' }],
+				callback: async (event) => {
+					await self.api.setString(resolveId(logical, event.options), String(event.options.value ?? ''))
+				},
+			}
 		}
 	}
 
