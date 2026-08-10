@@ -59,6 +59,12 @@ const SELECTOR_CONTEXT_PREFIX: Record<string, string> = { pru: 'PRU', lane: 'Lan
 const PATH_ROUTING_HEADER_DIMS = new Set(['lane'])
 
 /**
+ * Device-instance dims that split presets into separate categories
+ * ("Signal Processing - FS1", "Signal Processing - FS2").
+ */
+const PRESET_CATEGORY_DIMS = new Set(['fs'])
+
+/**
  * Selector dimensions that are sibling *values* of the same parameter (Color, Component) rather
  * than device instances (PRU, Lane, Channel, ...). These are small and worth a preset trio each;
  * every other dimension collapses to its default choice.
@@ -79,6 +85,34 @@ const selectorContext = (combo: SelectorCombo): string =>
 			SELECTOR_CONTEXT_PREFIX[entry.dim] ? `${SELECTOR_CONTEXT_PREFIX[entry.dim]} ${entry.label}` : entry.label,
 		)
 		.join(' - ')
+
+/** One category slice of a logical control — either the bare category, or `${category} - FS1`. */
+interface CategorySlice {
+	readonly category: string
+	readonly options: CompanionOptionValues
+	readonly keySuffix: string
+}
+
+/**
+ * Expand PRESET_CATEGORY_DIMS (FS) into separate preset categories. Controls without those dims
+ * yield a single slice at the bare category with default selector options.
+ */
+function categorySlices(logical: LogicalControl): CategorySlice[] {
+	const base = defaultOptions(logical)
+	const categorySelectors = logical.selectors.filter((selector) => PRESET_CATEGORY_DIMS.has(selector.dim))
+	if (categorySelectors.length === 0) {
+		return [{ category: logical.category ?? '', options: base, keySuffix: '' }]
+	}
+
+	return expandChoices(categorySelectors).map((combo) => {
+		const context = selectorContext(combo)
+		return {
+			category: `${logical.category} - ${context}`,
+			options: { ...base, ...optionsFromCombo(combo) },
+			keySuffix: `_${combo.map((entry) => entry.id).join('_')}`,
+		}
+	})
+}
 
 /** A text-only preset that titles the group of buttons following it in the category. */
 function addDivider(presets: CompanionPresetDefinitions, key: string, category: string, name: string): void {
@@ -109,15 +143,18 @@ function activeFeedbacks(
 }
 
 function addBoolean(presets: CompanionPresetDefinitions, logical: LogicalControl, interactive: boolean): void {
-	const options = defaultOptions(logical)
-	presets[logical.key] = {
-		type: 'button',
-		category: logical.category ?? '',
-		name: logical.name,
-		style: buttonStyle(logical.name, interactive),
-		steps: pressSteps(logical, { ...options, mode: 'toggle' }, interactive),
-		// Write-only controls never report a value back, so there's no feedback to light this with.
-		feedbacks: activeFeedbacks(logical, options, isReadable(logical.spec)),
+	for (const slice of categorySlices(logical)) {
+		const key = `${logical.key}${slice.keySuffix}`
+		addDivider(presets, key, slice.category, logical.name)
+		presets[key] = {
+			type: 'button',
+			category: slice.category,
+			name: logical.name,
+			style: buttonStyle(logical.name, interactive),
+			steps: pressSteps(logical, { ...slice.options, mode: 'toggle' }, interactive),
+			// Write-only controls never report a value back, so there's no feedback to light this with.
+			feedbacks: activeFeedbacks(logical, slice.options, isReadable(logical.spec)),
+		}
 	}
 }
 
@@ -194,21 +231,23 @@ function addSimpleEnum(
 	showsFeedback: boolean,
 	choices: readonly EnumChoice[],
 ): void {
-	addDivider(presets, logical.key, logical.category ?? '', logical.name)
-	const selectorDefaults = defaultOptions(logical)
 	const actionLabel = EVENT_ACTION_LABEL[logical.key]
 
-	for (const choice of choices) {
-		const options = { ...selectorDefaults, value: choice.id }
-		// Skip the prefix when the choice already says it ("Delete All" under DELETE).
-		const prefix = actionLabel && !choice.label.toUpperCase().startsWith(actionLabel) ? actionLabel : undefined
-		addEnumChoiceButton(presets, logical, interactive, showsFeedback, {
-			presetKey: `${logical.key}_${choice.id}`,
-			category: logical.category ?? '',
-			name: prefix ? `${prefix} ${choice.label}` : `${logical.name}: ${choice.label}`,
-			buttonText: prefix ? `${prefix}\n${choice.label}` : choice.label,
-			options,
-		})
+	for (const slice of categorySlices(logical)) {
+		addDivider(presets, `${logical.key}${slice.keySuffix}`, slice.category, logical.name)
+
+		for (const choice of choices) {
+			const options = { ...slice.options, value: choice.id }
+			// Skip the prefix when the choice already says it ("Delete All" under DELETE).
+			const prefix = actionLabel && !choice.label.toUpperCase().startsWith(actionLabel) ? actionLabel : undefined
+			addEnumChoiceButton(presets, logical, interactive, showsFeedback, {
+				presetKey: `${logical.key}${slice.keySuffix}_${choice.id}`,
+				category: slice.category,
+				name: prefix ? `${prefix} ${choice.label}` : `${logical.name}: ${choice.label}`,
+				buttonText: prefix ? `${prefix}\n${choice.label}` : choice.label,
+				options,
+			})
+		}
 	}
 }
 
@@ -231,9 +270,9 @@ function addEnum(presets: CompanionPresetDefinitions, logical: LogicalControl, i
 }
 
 /**
- * Writable numbers get +1/-1 nudge buttons flanking a status button showing the live value. One
- * trio is built per combination of the logical control's PRESET_EXPAND_DIMS selectors; any other
- * selector dimension stays at its default choice.
+ * Writable numbers get +1/-1 nudge buttons flanking a status button showing the live value.
+ * FS instances become separate categories; within each, PRESET_EXPAND_DIMS (color/comp) get a
+ * trio each. Any other selector dimension stays at its default choice.
  */
 function addNumber(
 	self: ModuleInstance,
@@ -241,19 +280,21 @@ function addNumber(
 	logical: LogicalControl,
 	interactive: boolean,
 ): void {
-	const base = defaultOptions(logical)
 	const expandable = logical.selectors.filter((selector) => PRESET_EXPAND_DIMS.has(selector.dim))
 
-	for (const combo of expandChoices(expandable)) {
-		const options: CompanionOptionValues = { ...base, ...optionsFromCombo(combo) }
-		const key = combo.length
-			? `${logical.key}_${combo.map((entry) => entry.id.replace(/-/g, '')).join('_')}`
-			: logical.key
-		// logical.name carries a "(R/G/B)"-style listing of every sibling choice; drop it so the
-		// per-choice preset names only the one value they actually target.
-		const variantLabel = combo.map((entry) => entry.label).join('/')
-		const name = combo.length ? `${logical.name.replace(/\s*\([^)]*\)\s*$/, '')} ${variantLabel}` : logical.name
-		addNumberPreset(self, presets, logical, interactive, options, key, name, variantLabel)
+	for (const slice of categorySlices(logical)) {
+		addDivider(presets, `${logical.key}${slice.keySuffix}`, slice.category, logical.name)
+
+		for (const combo of expandChoices(expandable)) {
+			const options: CompanionOptionValues = { ...slice.options, ...optionsFromCombo(combo) }
+			const variantKey = combo.length ? `_${combo.map((entry) => entry.id.replace(/-/g, '')).join('_')}` : ''
+			const key = `${logical.key}${slice.keySuffix}${variantKey}`
+			// logical.name carries a "(R/G/B)"-style listing of every sibling choice; drop it so the
+			// per-choice preset names only the one value they actually target.
+			const variantLabel = combo.map((entry) => entry.label).join('/')
+			const name = combo.length ? `${logical.name.replace(/\s*\([^)]*\)\s*$/, '')} ${variantLabel}` : logical.name
+			addNumberPreset(self, presets, logical, interactive, options, key, name, variantLabel, slice.category)
+		}
 	}
 }
 
@@ -266,13 +307,13 @@ function addNumberPreset(
 	key: string,
 	name: string,
 	variantLabel: string,
+	category: string,
 ): void {
-	const category = logical.category ?? ''
 	const valueRef = `$(${self.label}:${resolveId(logical, options)})`
 	const unit = logical.spec.kind === 'number' && logical.spec.unit ? ` ${logical.spec.unit}` : ''
 
 	const nudge = (suffix: string, mode: 'increase' | 'decrease', text: string): void => {
-		const buttonText = variantLabel ? `${text}\n${variantLabel}` : text
+		const buttonText = `${text}\n${variantLabel || name}`
 		presets[`${key}_${suffix}`] = {
 			type: 'button',
 			category,
@@ -310,15 +351,13 @@ export function UpdatePresets(self: ModuleInstance): void {
 
 		switch (logical.spec.kind) {
 			case 'boolean':
-				addDivider(presets, logical.key, logical.category ?? '', logical.name)
 				addBoolean(presets, logical, interactive)
 				break
 			case 'enum':
-				// addEnum manages its own divider(s) — Path & Routing enums split into one per instance.
+				// addEnum manages its own divider(s) — Path & Routing / FS enums split into one per instance.
 				addEnum(presets, logical, interactive)
 				break
 			case 'number':
-				addDivider(presets, logical.key, logical.category ?? '', logical.name)
 				addNumber(self, presets, logical, interactive)
 				break
 			case 'string':
