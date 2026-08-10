@@ -1,4 +1,4 @@
-import { InstanceBase, runEntrypoint, SomeCompanionConfigField } from '@companion-module/base'
+import { InstanceBase, runEntrypoint, type SomeCompanionConfigField } from '@companion-module/base'
 import { UpdateActions } from './actions.js'
 import { ForaApi } from './api.js'
 import { GetConfigFields, type ModuleConfig } from './config.js'
@@ -7,6 +7,7 @@ import { buildLogicalControls, type LogicalControl } from './logical-controls.js
 import { UpdatePresets } from './presets.js'
 import { buildDefinitions, DeviceStateStore, type VariableDefinition } from './state.js'
 import { UpgradeScripts } from './upgrades.js'
+import { errorMessage } from './util.js'
 import { UpdateVariableDefinitions } from './variables.js'
 
 export class ModuleInstance extends InstanceBase<ModuleConfig> {
@@ -52,7 +53,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 
 	#startConnection(): void {
 		this.api.connect().catch((error: unknown) => {
-			this.log('error', `Connection failed: ${error instanceof Error ? error.message : String(error)}`)
+			this.log('error', `Connection failed: ${errorMessage(error)}`)
 		})
 	}
 

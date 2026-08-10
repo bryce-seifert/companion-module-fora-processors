@@ -4,6 +4,7 @@ import { isWritable, type ControlSpec } from './definitions/controls.js'
 import type { ModuleInstance } from './main.js'
 import { describeIdentitySource, getModelSpec, type ModelSpec } from './models.js'
 import { formatValue, groupByParent, PATH_DELIMITER, type ParentGroupMember, type VariableDefinition } from './state.js'
+import { errorMessage } from './util.js'
 import { walkDefinitions } from './walk.js'
 
 const RECONNECT_INTERVAL_MS = 5000
@@ -69,7 +70,7 @@ export class ForaApi {
 		try {
 			connectResult = await client.connect()
 		} catch (error) {
-			this.#handleDrop(error instanceof Error ? error.message : String(error))
+			this.#handleDrop(errorMessage(error))
 			return
 		}
 		if (connectResult instanceof Error) {
@@ -88,7 +89,7 @@ export class ForaApi {
 			deviceId = await this.#readDeviceId(client, spec)
 		} catch (error) {
 			// A failed read is treated as a transient connection problem.
-			this.#handleDrop(error instanceof Error ? error.message : String(error))
+			this.#handleDrop(errorMessage(error))
 			return
 		}
 
@@ -178,10 +179,7 @@ export class ForaApi {
 					this.#self.state.set(live.def.id, formatValue(live.def.control, updated.contents.value))
 				})
 			} catch (error) {
-				this.#self.log(
-					'warn',
-					`Failed to subscribe to "${live.def.path}": ${error instanceof Error ? error.message : String(error)}`,
-				)
+				this.#self.log('warn', `Failed to subscribe to "${live.def.path}": ${errorMessage(error)}`)
 			}
 		})
 	}
@@ -257,13 +255,10 @@ export class ForaApi {
 			// The acknowledgement is a second promise, and an unhandled rejection from it would kill
 			// the module process. Not awaited — the subscription already carries the value back.
 			request.response?.catch((error: unknown) => {
-				this.#self.log(
-					'debug',
-					`No acknowledgement for ${live.def.id}: ${error instanceof Error ? error.message : String(error)}`,
-				)
+				this.#self.log('debug', `No acknowledgement for ${live.def.id}: ${errorMessage(error)}`)
 			})
 		} catch (error) {
-			this.#self.log('warn', `Failed to set ${live.def.id}: ${error instanceof Error ? error.message : String(error)}`)
+			this.#self.log('warn', `Failed to set ${live.def.id}: ${errorMessage(error)}`)
 		}
 	}
 
@@ -274,24 +269,21 @@ export class ForaApi {
 			await client.getDirectory(client.tree)
 		).response
 
-		const node = await client.getElementByPath(
-			spec.identity.kind === 'parameter' ? spec.identity.path : spec.identity.root,
-			undefined,
-			PATH_DELIMITER,
-		)
+		const identityPath = spec.identity.kind === 'parameter' ? spec.identity.path : spec.identity.root
+		const node = await client.getElementByPath(identityPath, undefined, PATH_DELIMITER)
 		const contents = node?.contents
 		if (!contents) return undefined
 
-		const raw =
-			spec.identity.kind === 'parameter'
-				? contents.type === Model.ElementType.Parameter
-					? contents.value
-					: undefined
-				: contents.type === Model.ElementType.Node
-					? contents.description
-					: undefined
-
+		const raw = this.#identityRawValue(spec, contents)
 		return raw === undefined || raw === null ? undefined : String(raw).trim()
+	}
+
+	/** Pulls the identity string from either a parameter value or a root node's description. */
+	#identityRawValue(spec: ModelSpec, contents: Model.EmberElement): Types.EmberValue | undefined {
+		if (spec.identity.kind === 'parameter') {
+			return contents.type === Model.ElementType.Parameter ? contents.value : undefined
+		}
+		return contents.type === Model.ElementType.Node ? contents.description : undefined
 	}
 
 	#handleDrop(reason: string): void {
@@ -354,7 +346,7 @@ export class ForaApi {
 			).response
 		} catch (error) {
 			if (this.#client !== client) return
-			this.#self.log('debug', `Heartbeat failed: ${error instanceof Error ? error.message : String(error)}`)
+			this.#self.log('debug', `Heartbeat failed: ${errorMessage(error)}`)
 		}
 	}
 

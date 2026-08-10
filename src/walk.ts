@@ -1,6 +1,7 @@
 import type { EmberClient } from 'emberplus-connection'
 import { Model } from 'emberplus-connection'
 import { PATH_DELIMITER, type ParentGroupMember, type VariableDefinition } from './definitions/shared.js'
+import { errorMessage } from './util.js'
 
 export interface WalkOptions {
 	readonly concurrency: number
@@ -135,7 +136,7 @@ export async function walkDefinitions(
 					await client.getDirectory(node as Model.NumberedTreeNode<Model.EmberElement>)
 				).response
 			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error)
+				const message = errorMessage(error)
 				if (attempt < opts.maxAttempts && !cb.isCancelled()) {
 					stats.retried++
 					queue.push({ path, attempt: attempt + 1 })

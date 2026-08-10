@@ -6,12 +6,12 @@ export type IdentitySource =
 	{ readonly kind: 'parameter'; readonly path: string } | { readonly kind: 'rootDescription'; readonly root: string }
 
 export interface ModelSpec {
-	id: ModelId
-	label: string
-	port: number
-	identity: IdentitySource
-	// Value the device reports at `identity`; used to verify the configured model matches the hardware.
-	deviceId: string
+	readonly id: ModelId
+	readonly label: string
+	readonly port: number
+	readonly identity: IdentitySource
+	/** Value the device reports at `identity`; used to verify the configured model matches the hardware. */
+	readonly deviceId: string
 }
 
 export const MODELS: Record<ModelId, ModelSpec> = {

@@ -1,4 +1,5 @@
 import type { CompanionVariableValue } from '@companion-module/base'
+import type { Types } from 'emberplus-connection'
 import type { ControlSpec } from './controls.js'
 
 // An Ember+ parameter before its control metadata has been attached. The model tables are
@@ -105,10 +106,15 @@ export function groupByParent(definitions: readonly VariableDefinition[]): Map<s
 	return groups
 }
 
-// Turns a raw device value into what the Companion variable shows: enums display their label,
-// scaled numbers are divided back down. Driven entirely by the definition's spec, so the same
-// formatting applies whether the value came from the initial read or a subscription update.
-export function formatValue(spec: ControlSpec, value: unknown): CompanionVariableValue | undefined {
+/**
+ * Turns a raw device value into what the Companion variable shows: enums display their label,
+ * scaled numbers are divided back down. Driven entirely by the definition's spec, so the same
+ * formatting applies whether the value came from the initial read or a subscription update.
+ */
+export function formatValue(
+	spec: ControlSpec,
+	value: Types.EmberValue | undefined,
+): CompanionVariableValue | undefined {
 	if (value === undefined || value === null) return undefined
 
 	if (spec.kind === 'enum' && typeof value === 'number') {
@@ -120,5 +126,6 @@ export function formatValue(spec: ControlSpec, value: unknown): CompanionVariabl
 
 	if (Buffer.isBuffer(value)) return value.toString('hex')
 	if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value
-	return undefined // Ember+ carries nothing else; anything left has no sensible display form.
+	// EmberValue is exhausted above; keep a final guard for future library widenings.
+	return undefined
 }
