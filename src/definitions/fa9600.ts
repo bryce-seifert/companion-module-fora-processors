@@ -167,8 +167,15 @@ function fsDefinitions(n: 1 | 2): DefinitionDraft[] {
 }
 
 function statusDefinitions(): DefinitionDraft[] {
-	const status = 'root/video/common/status'
+	const common = 'root/video/common'
+	const status = `${common}/status`
 	return [
+		{
+			id: 'genlock_source',
+			name: 'Genlock Source',
+			path: `${common}/genlock-source`,
+			category: CATEGORY.SYNCHRONIZATION,
+		},
 		{
 			id: 'genlock_status',
 			name: 'Genlock Status',

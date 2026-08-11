@@ -424,6 +424,13 @@ export const FA9600_CONTROLS: Record<string, ControlSpec> = {
 		[16, '29.97PsF'],
 		[17, '25PsF'],
 	]),
+	// Genlock Source — 1 instance
+	genlock_source: choice('readwrite', [
+		[0, 'GENLOCK IN'],
+		[1, 'FS1 IN'],
+		[2, 'FS2 IN'],
+		[3, 'Free Run'],
+	]),
 	// Genlock Status (in-reference/format) — 1 instance
 	genlock_status: text('read'),
 	// FS2 SDR Gain — 2 instances

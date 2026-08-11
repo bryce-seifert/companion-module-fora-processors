@@ -339,8 +339,30 @@ function addNumberPreset(
 }
 
 /**
+ * Readable strings get a status-only button showing the live variable. Metadata labels are
+ * filtered out before this runs; write-only strings have nothing to display.
+ */
+function addString(self: ModuleInstance, presets: CompanionPresetDefinitions, logical: LogicalControl): void {
+	if (!isReadable(logical.spec)) return
+
+	for (const slice of categorySlices(logical)) {
+		const key = `${logical.key}${slice.keySuffix}`
+		const valueRef = `$(${self.label}:${resolveId(logical, slice.options)})`
+		addDivider(presets, key, slice.category, logical.name)
+		presets[`${key}_status`] = {
+			type: 'button',
+			category: slice.category,
+			name: `${logical.name} Status`,
+			style: buttonStyle(`${logical.name}\n${valueRef}`, false),
+			steps: [],
+			feedbacks: [],
+		}
+	}
+}
+
+/**
  * Writable controls get an interactive preset (action + feedback); read-only ones get a
- * status-only preset. Free-text labels have no feedback to drive a button, so they're skipped.
+ * status-only preset. Metadata free-text labels are skipped via CATEGORY.METADATA_LABELING.
  */
 export function UpdatePresets(self: ModuleInstance): void {
 	const presets: CompanionPresetDefinitions = {}
@@ -361,6 +383,7 @@ export function UpdatePresets(self: ModuleInstance): void {
 				addNumber(self, presets, logical, interactive)
 				break
 			case 'string':
+				addString(self, presets, logical)
 				break
 		}
 	}
