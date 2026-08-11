@@ -170,10 +170,10 @@ function statusDefinitions(): DefinitionDraft[] {
 	const status = 'root/video/common/status'
 	return [
 		{
-			id: 'ref_format',
-			name: 'Reference Format',
+			id: 'genlock_status',
+			name: 'Genlock Status',
 			path: `${status}/in-reference/format`,
-			category: CATEGORY.SIGNAL_STATUS,
+			category: CATEGORY.SYNCHRONIZATION,
 		},
 		{
 			id: 'in1_format',

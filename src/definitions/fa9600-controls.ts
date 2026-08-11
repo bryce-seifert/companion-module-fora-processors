@@ -424,16 +424,15 @@ export const FA9600_CONTROLS: Record<string, ControlSpec> = {
 		[16, '29.97PsF'],
 		[17, '25PsF'],
 	]),
-	// Reference Format — 1 instance
-	ref_format: text('read'),
+	// Genlock Status (in-reference/format) — 1 instance
+	genlock_status: text('read'),
 	// FS2 SDR Gain — 2 instances
 	sdr_gain: num('readwrite', { min: 0, max: 2400, factor: 100, unit: 'dB' }),
-	// FS2 Video Input Select — 2 instances
+	// FS2 Video Input Select — 2 instances (synchronizer/source-select)
 	source_select: choice('readwrite', [
-		[0, 'Synchronizer1'],
-		[1, 'Converter1'],
-		[2, 'Synchronizer2'],
-		[3, 'Converter2'],
+		[0, 'IN1'],
+		[1, 'IN2'],
+		[2, 'HDMI IN'],
 	]),
 	// FS2 Standard — 2 instances
 	standard: choice('readwrite', [

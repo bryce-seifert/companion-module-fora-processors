@@ -161,8 +161,8 @@ export class ForaApi {
 				`absent parents, retried ${stats.retried}, gave up on ${stats.failed}`,
 		)
 		this.#self.log(
-			'info',
-			`Seeded ${this.#live.size}/${this.#self.definitions.length} parameters (${absentTotal} absent on this unit)`,
+			'debug',
+			`Found ${this.#live.size}/${this.#self.definitions.length} parameters (${absentTotal} absent on this unit)`,
 		)
 
 		// One request per parameter, so it runs after every value is already current as of its read.
