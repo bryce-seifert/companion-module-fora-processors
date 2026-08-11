@@ -366,9 +366,9 @@ export class ForaApi {
 			await (
 				await client.getDirectory(target)
 			).response
-		} catch (error) {
+		} catch (_error) {
 			if (this.#client !== client) return
-			this.#self.log('debug', `Heartbeat failed: ${errorMessage(error)}`)
+			//this.#self.log('debug', `Heartbeat failed: ${errorMessage(error)}`)
 		}
 	}
 
