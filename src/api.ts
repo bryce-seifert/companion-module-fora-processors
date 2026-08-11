@@ -39,6 +39,8 @@ export class ForaApi {
 	#reconnectTimer: NodeJS.Timeout | null = null
 	#heartbeatTimer: NodeJS.Timeout | null = null
 	#destroyed = false
+	// Set while retrying after a drop, so each failed attempt doesn't repeat the same warning.
+	#retrying = false
 	// Parameters this unit actually carries, resolved on the current connection.
 	readonly #live = new Map<string, LiveParameter>()
 
@@ -47,6 +49,11 @@ export class ForaApi {
 	}
 
 	async connect(): Promise<void> {
+		this.#retrying = false
+		await this.#openConnection()
+	}
+
+	async #openConnection(): Promise<void> {
 		this.#destroyed = false
 		await this.#teardownClient()
 
@@ -79,11 +86,14 @@ export class ForaApi {
 		}
 		if (this.#client !== client) return // superseded by a newer connect()/teardown
 
-		this.#self.log('info', `Connected to ${spec.label} at ${host}:${spec.port}, verifying identity`)
-		await this.#verifyIdentity(client, spec)
+		this.#self.log(
+			'info',
+			`${this.#retrying ? 'Reconnected' : 'Connected'} to ${spec.label} at ${host}:${spec.port}, verifying model...`,
+		)
+		await this.#verifyModel(client, spec)
 	}
 
-	async #verifyIdentity(client: EmberClient, spec: ModelSpec): Promise<void> {
+	async #verifyModel(client: EmberClient, spec: ModelSpec): Promise<void> {
 		let deviceId: string | undefined
 		try {
 			deviceId = await this.#readDeviceId(client, spec)
@@ -96,7 +106,7 @@ export class ForaApi {
 		if (this.#client !== client) return // superseded while awaiting
 
 		if (deviceId === undefined) {
-			this.#handleDrop(`Could not read device identity from ${describeIdentitySource(spec.identity)}`)
+			this.#handleDrop(`Could not read device model from ${describeIdentitySource(spec.identity)}`)
 			return
 		}
 
@@ -106,12 +116,14 @@ export class ForaApi {
 				`Model mismatch: device reports "${deviceId}" but config is set to ${spec.label} ("${spec.deviceId}")`,
 			)
 			this.#self.updateStatus(InstanceStatus.BadConfig, `Wrong model: device is "${deviceId}", expected ${spec.label}`)
+			this.#retrying = false
 			await this.#teardownClient() // config error, not transient — stop without reconnecting
 			return
 		}
 
-		this.#self.log('info', `Identity confirmed: ${deviceId}`)
+		this.#self.log('info', `Device model confirmed: ${deviceId}`)
 		this.#self.updateStatus(InstanceStatus.Ok)
+		this.#retrying = false
 
 		this.#startHeartbeat(client)
 		await this.#seedValues(client)
@@ -294,7 +306,17 @@ export class ForaApi {
 		this.#client = null
 		if (!client) return
 
-		this.#self.log('warn', `Connection lost: ${reason}`)
+		if (this.#retrying) {
+			// Already announced; keep the retry loop out of the log until it succeeds.
+			this.#self.log('debug', `Reconnect attempt failed: ${reason}`)
+		} else {
+			this.#retrying = true
+			this.#self.log(
+				'warn',
+				`Connection lost: ${reason}. Retrying every ${RECONNECT_INTERVAL_MS / 1000}s until reconnected.`,
+			)
+		}
+
 		void this.#disposeClient(client)
 		this.#live.clear()
 		this.#self.state.clear()
@@ -306,7 +328,7 @@ export class ForaApi {
 		if (this.#destroyed || this.#reconnectTimer) return
 		this.#reconnectTimer = setTimeout(() => {
 			this.#reconnectTimer = null
-			void this.connect()
+			void this.#openConnection()
 		}, RECONNECT_INTERVAL_MS)
 	}
 
