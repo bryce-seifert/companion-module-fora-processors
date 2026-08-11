@@ -73,7 +73,7 @@ const PRESET_EXPAND_DIMS = new Set(['color', 'comp'])
 
 const buttonStyle = (text: string, interactive: boolean) => ({
 	text,
-	size: '14' as const,
+	size: 12 as const,
 	color: BUTTON_TEXT,
 	bgcolor: interactive ? BUTTON_BG : STATUS_BG,
 	show_topbar: false as const,
@@ -142,15 +142,21 @@ function activeFeedbacks(
 	return [{ feedbackId: feedbackId(logical), options, style: ACTIVE_STYLE }]
 }
 
-function addBoolean(presets: CompanionPresetDefinitions, logical: LogicalControl, interactive: boolean): void {
+function addBoolean(
+	self: ModuleInstance,
+	presets: CompanionPresetDefinitions,
+	logical: LogicalControl,
+	interactive: boolean,
+): void {
 	for (const slice of categorySlices(logical)) {
 		const key = `${logical.key}${slice.keySuffix}`
+		const valueRef = `$(${self.label}:${resolveId(logical, slice.options)})`
 		addDivider(presets, key, slice.category, logical.name)
 		presets[key] = {
 			type: 'button',
 			category: slice.category,
 			name: logical.name,
-			style: buttonStyle(logical.name, interactive),
+			style: buttonStyle(`${logical.name}\n${valueRef}`, interactive),
 			steps: pressSteps(logical, { ...slice.options, mode: 'toggle' }, interactive),
 			// Write-only controls never report a value back, so there's no feedback to light this with.
 			feedbacks: activeFeedbacks(logical, slice.options, isReadable(logical.spec)),
@@ -244,7 +250,8 @@ function addSimpleEnum(
 				presetKey: `${logical.key}${slice.keySuffix}_${choice.id}`,
 				category: slice.category,
 				name: prefix ? `${prefix} ${choice.label}` : `${logical.name}: ${choice.label}`,
-				buttonText: prefix ? `${prefix}\n${choice.label}` : choice.label,
+				// Event actions keep LOAD/SAVE as the label line; everything else uses the control name.
+				buttonText: `${prefix ?? logical.name}\n${choice.label}`,
 				options,
 			})
 		}
@@ -373,7 +380,7 @@ export function UpdatePresets(self: ModuleInstance): void {
 
 		switch (logical.spec.kind) {
 			case 'boolean':
-				addBoolean(presets, logical, interactive)
+				addBoolean(self, presets, logical, interactive)
 				break
 			case 'enum':
 				// addEnum manages its own divider(s) — Path & Routing / FS enums split into one per instance.
