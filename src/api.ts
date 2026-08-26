@@ -33,6 +33,30 @@ async function runPool<T>(items: readonly T[], limit: number, worker: (item: T) 
 	await Promise.all(runners)
 }
 
+function numericPath(node: Model.NumberedTreeNode<Model.EmberElement>): string {
+	const segments: number[] = []
+	let current: Model.TreeElement<Model.EmberElement> | undefined = node
+	while (current && 'number' in current) {
+		segments.unshift((current as Model.NumberedTreeNode<Model.EmberElement>).number)
+		current = current.parent
+	}
+	return segments.join('.')
+}
+
+// emberplus-connection sends a command with the node's full contents attached; the units treat the
+// value riding along as a write, which re-applies dependent defaults. Address by path instead.
+function subscribeTarget(node: Model.NumberedTreeNode<Model.Parameter>): Model.QualifiedElement<Model.Parameter> {
+	return new Model.QualifiedElementImpl(numericPath(node), { type: Model.ElementType.Parameter } as Model.Parameter)
+}
+
+// As above, plus the type needed to encode the value.
+function writeTarget(node: Model.NumberedTreeNode<Model.Parameter>): Model.QualifiedElement<Model.Parameter> {
+	return new Model.QualifiedElementImpl(numericPath(node), {
+		type: Model.ElementType.Parameter,
+		parameterType: node.contents.parameterType,
+	})
+}
+
 export class ForaApi {
 	readonly #self: ModuleInstance
 	#client: EmberClient | null = null
@@ -184,7 +208,7 @@ export class ForaApi {
 	async #subscribeAll(client: EmberClient): Promise<void> {
 		await runPool([...this.#live.values()], POPULATE_CONCURRENCY, async (live) => {
 			try {
-				await client.subscribe(live.node, (updated) => {
+				await client.subscribe(subscribeTarget(live.node), (updated) => {
 					if (this.#client !== client) return // stale update from a superseded client
 					if (updated.contents.type !== Model.ElementType.Parameter) return
 					live.latestRaw = updated.contents.value
@@ -263,7 +287,7 @@ export class ForaApi {
 			return
 		}
 		try {
-			const request = await client.setValue(live.node, value)
+			const request = await client.setValue(writeTarget(live.node), value)
 			// The acknowledgement is a second promise, and an unhandled rejection from it would kill
 			// the module process. Not awaited — the subscription already carries the value back.
 			request.response?.catch((error: unknown) => {
