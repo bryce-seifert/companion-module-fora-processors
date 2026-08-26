@@ -1,7 +1,8 @@
 import type { CompanionVariableValue, CompanionVariableValues } from '@companion-module/base'
 import { buildFa1616Definitions } from './definitions/fa1616.js'
 import { buildFa9600Definitions } from './definitions/fa9600.js'
-import type { VariableDefinition, VariableId } from './definitions/shared.js'
+import { relabelChoices, type ControlSpec } from './definitions/controls.js'
+import { controlKey as controlKeyOf, type VariableDefinition, type VariableId } from './definitions/shared.js'
 import type { ModuleInstance } from './main.js'
 import type { ModelId } from './models.js'
 
@@ -19,8 +20,27 @@ export {
 	type VariableId,
 } from './definitions/shared.js'
 
-export function buildDefinitions(model: ModelId | undefined): VariableDefinition[] {
-	return model === '1616' ? buildFa1616Definitions() : buildFa9600Definitions()
+/** Enum labels read from the device, keyed by control key then by the enum's own id. */
+export type ChoiceLabels = ReadonlyMap<string, ReadonlyMap<number, string>>
+
+export function buildDefinitions(model: ModelId | undefined, choiceLabels: ChoiceLabels): VariableDefinition[] {
+	const definitions = model === '1616' ? buildFa1616Definitions() : buildFa9600Definitions()
+	if (choiceLabels.size === 0) return definitions
+
+	// Instances of a parameter share one spec object; keep that so the relabelled spec is built once.
+	const relabelled = new Map<string, ControlSpec>()
+	return definitions.map((def) => {
+		const key = controlKeyOf(def)
+		const labels = choiceLabels.get(key)
+		if (!labels || def.control.kind !== 'enum') return def
+
+		let spec = relabelled.get(key)
+		if (!spec) {
+			spec = relabelChoices(def.control, labels)
+			relabelled.set(key, spec)
+		}
+		return { ...def, control: spec }
+	})
 }
 
 // Tracks which placed feedback instances depend on which variable id, so a change to one id only
@@ -29,6 +49,8 @@ export class DeviceStateStore {
 	readonly #self: ModuleInstance
 	readonly #values = new Map<VariableId, CompanionVariableValue | undefined>()
 	readonly #feedbackIds = new Map<VariableId, Set<string>>()
+	// The reverse index, so re-pointing a feedback drops it from the id it used to read.
+	readonly #feedbackTargets = new Map<string, VariableId>()
 
 	constructor(self: ModuleInstance) {
 		this.#self = self
@@ -47,14 +69,24 @@ export class DeviceStateStore {
 		return this.#values.get(id)
 	}
 
-	registerFeedback(id: VariableId, feedbackId: string): void {
+	// Points a placed feedback at the variable it currently reads. Called on every evaluation, since
+	// Companion runs `subscribe` only on insert and an edited feedback would keep its original id.
+	trackFeedback(feedbackId: string, id: VariableId): void {
+		const previous = this.#feedbackTargets.get(feedbackId)
+		if (previous === id) return
+		if (previous !== undefined) this.#feedbackIds.get(previous)?.delete(feedbackId)
+
+		this.#feedbackTargets.set(feedbackId, id)
 		const ids = this.#feedbackIds.get(id) ?? new Set<string>()
 		ids.add(feedbackId)
 		this.#feedbackIds.set(id, ids)
 	}
 
-	unregisterFeedback(id: VariableId, feedbackId: string): void {
-		this.#feedbackIds.get(id)?.delete(feedbackId)
+	untrackFeedback(feedbackId: string): void {
+		const previous = this.#feedbackTargets.get(feedbackId)
+		if (previous === undefined) return
+		this.#feedbackIds.get(previous)?.delete(feedbackId)
+		this.#feedbackTargets.delete(feedbackId)
 	}
 
 	// Blanks every variable on disconnect; feedback subscriptions themselves survive reconnects.

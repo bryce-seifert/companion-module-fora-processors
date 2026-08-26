@@ -3,11 +3,18 @@ import { Model } from 'emberplus-connection'
 import { PATH_DELIMITER, type ParentGroupMember, type VariableDefinition } from './definitions/shared.js'
 import { errorMessage } from './util.js'
 
+// The library's `FieldFlags` isn't re-exported from the package root (`Model` covers only the
+// element types), so take it from the signature that consumes it.
+export type DirFieldMask = Parameters<EmberClient['getDirectory']>[1]
+
 export interface WalkOptions {
 	readonly concurrency: number
 	// A task that times out is re-queued at the back; without this a single dropped directory
 	// silently loses every definition beneath it for the whole session.
 	readonly maxAttempts: number
+	// The field mask to list a directory with, or `undefined` for a full listing. Lets the caller
+	// restrict the reply for directories the device cannot serialise whole.
+	readonly dirFieldMask: (path: string) => DirFieldMask
 }
 
 export interface WalkCallbacks {
@@ -24,6 +31,10 @@ export interface WalkCallbacks {
 export interface WalkStats {
 	// Directories we issued a getDirectory for.
 	requested: number
+	// Of those, the ones listed with a field mask rather than in full.
+	masked: number
+	// Parameter children we then listed individually under a masked parent.
+	filled: number
 	// Child paths skipped because their parent came back empty (unfitted option blocks).
 	pruned: number
 	retried: number
@@ -76,7 +87,8 @@ interface WalkTask {
 //
 // Seeding is merged into the walk: a parent's getDirectory response already carries each child's
 // complete contents (value, min/max, factor, enumeration, access), so definitions are resolved the
-// moment their parent lands rather than in a second pass.
+// moment their parent lands rather than in a second pass. Directories that can't be listed whole are
+// the exception: they are listed with a field mask, then each parameter child is fetched on its own.
 export async function walkDefinitions(
 	client: EmberClient,
 	groups: Map<string, ParentGroupMember[]>,
@@ -84,7 +96,7 @@ export async function walkDefinitions(
 	cb: WalkCallbacks,
 ): Promise<WalkStats> {
 	const { roots, wantedChildren } = planDescent(groups.keys())
-	const stats: WalkStats = { requested: 0, pruned: 0, retried: 0, failed: 0 }
+	const stats: WalkStats = { requested: 0, masked: 0, filled: 0, pruned: 0, retried: 0, failed: 0 }
 
 	const queue: WalkTask[] = roots.map((path) => ({ path, attempt: 1 }))
 	const queued = new Set<string>(roots)
@@ -115,6 +127,31 @@ export async function walkDefinitions(
 		}
 	}
 
+	// The unit answers a full getDirectory on each child; only the combined listing overflows a
+	// frame. Failures here leave the identifier and value from the masked parent.
+	const fillMaskedChildren = async (
+		parent: Model.NumberedTreeNode<Model.EmberElement>,
+		parentPath: string,
+	): Promise<void> => {
+		if (!parent.children) return
+		for (const child of Object.values(parent.children)) {
+			if (child.contents.type !== Model.ElementType.Parameter) continue
+			const identifier = 'identifier' in child.contents ? child.contents.identifier : undefined
+			stats.requested++
+			stats.filled++
+			try {
+				await (
+					await client.getDirectory(child)
+				).response
+			} catch (error) {
+				cb.log(
+					'debug',
+					`Child "${parentPath}${PATH_DELIMITER}${identifier ?? child.number}" not filled: ${errorMessage(error)}`,
+				)
+			}
+		}
+	}
+
 	const runTask = async ({ path, attempt }: WalkTask): Promise<void> => {
 		let node: Model.TreeElement<Model.EmberElement> | undefined
 		try {
@@ -128,12 +165,17 @@ export async function walkDefinitions(
 			return
 		}
 
-		// A node may already hold children from its parent's response; only ask when it doesn't.
-		if (!hasChildren(node)) {
+		const numbered = node as Model.NumberedTreeNode<Model.EmberElement>
+		const mask = opts.dirFieldMask(path)
+		// Listed even when the parent attached child stubs: the library won't copy `identifier` onto
+		// existing children, so drop the stubs and let the masked reply replace them whole.
+		if (mask !== undefined || !hasChildren(numbered)) {
+			if (mask !== undefined) numbered.children = undefined
 			stats.requested++
+			if (mask !== undefined) stats.masked++
 			try {
 				await (
-					await client.getDirectory(node as Model.NumberedTreeNode<Model.EmberElement>)
+					await client.getDirectory(numbered, mask)
 				).response
 			} catch (error) {
 				const message = errorMessage(error)
@@ -147,14 +189,16 @@ export async function walkDefinitions(
 				prune(path)
 				return
 			}
+
+			if (mask !== undefined) await fillMaskedChildren(numbered, path)
 		}
 
-		if (!hasChildren(node)) {
+		if (!hasChildren(numbered)) {
 			prune(path)
 			return
 		}
 
-		seed(path, node)
+		seed(path, numbered)
 
 		for (const child of wantedChildren.get(path) ?? []) {
 			const childPath = `${path}${PATH_DELIMITER}${child}`

@@ -67,3 +67,12 @@ export function isWritable(spec: ControlSpec): boolean {
 export function isReadable(spec: ControlSpec): boolean {
 	return spec.access === 'read' || spec.access === 'readwrite'
 }
+
+// Same enum, device-supplied labels. Ids the device didn't name keep the table's own label, so a
+// partial read degrades to static text rather than blanking choices out of the dropdowns.
+export function relabelChoices(spec: EnumSpec, labels: ReadonlyMap<number, string>): EnumSpec {
+	return {
+		...spec,
+		choices: spec.choices.map((choice) => ({ ...choice, label: labels.get(choice.id) ?? choice.label })),
+	}
+}

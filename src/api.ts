@@ -2,16 +2,20 @@ import { InstanceStatus } from '@companion-module/base'
 import { EmberClient, Model, Types } from 'emberplus-connection'
 import { isWritable, type ControlSpec } from './definitions/controls.js'
 import type { ModuleInstance } from './main.js'
-import { describeIdentitySource, getModelSpec, type ModelSpec } from './models.js'
+import { describeIdentitySource, getModelSpec, isTruncatedDirectory, type ModelSpec } from './models.js'
 import { formatValue, groupByParent, PATH_DELIMITER, type ParentGroupMember, type VariableDefinition } from './state.js'
 import { errorMessage } from './util.js'
-import { walkDefinitions } from './walk.js'
+import { walkDefinitions, type DirFieldMask } from './walk.js'
 
 const RECONNECT_INTERVAL_MS = 5000
 const POPULATE_CONCURRENCY = 32
 const REQUEST_TIMEOUT_MS = 10000
 const HEARTBEAT_INTERVAL_MS = 8000
 const WALK_MAX_ATTEMPTS = 3
+
+// dirFieldMask 5 (Identifier | Value) keeps a truncated directory inside one frame. The library
+// spells that integer 'CONNECTIONS'; the name is wrong for what we ask, the wire value is what counts.
+const IDENTIFIER_AND_VALUE_MASK = 'CONNECTIONS' as DirFieldMask
 
 // A definition matched to the live parameter node it resolved to. The node is what `setValue` and
 // `subscribe` need; everything else comes from `def.control`.
@@ -49,11 +53,28 @@ function subscribeTarget(node: Model.NumberedTreeNode<Model.Parameter>): Model.Q
 	return new Model.QualifiedElementImpl(numericPath(node), { type: Model.ElementType.Parameter } as Model.Parameter)
 }
 
+// The decoder settles on `Null` when a listing gives it no parameterType, which would encode the
+// write as a BER null. Fall back to what the control tables say the parameter accepts.
+function writeParameterType(live: LiveParameter): Model.ParameterType {
+	const reported = live.node.contents.parameterType
+	if (reported && reported !== Model.ParameterType.Null) return reported
+
+	switch (live.def.control.kind) {
+		case 'boolean':
+			return Model.ParameterType.Boolean
+		case 'string':
+			return Model.ParameterType.String
+		// Enums are written as the device's own index, and numbers as factor-scaled integers.
+		default:
+			return Model.ParameterType.Integer
+	}
+}
+
 // As above, plus the type needed to encode the value.
-function writeTarget(node: Model.NumberedTreeNode<Model.Parameter>): Model.QualifiedElement<Model.Parameter> {
-	return new Model.QualifiedElementImpl(numericPath(node), {
+function writeTarget(live: LiveParameter): Model.QualifiedElement<Model.Parameter> {
+	return new Model.QualifiedElementImpl(numericPath(live.node), {
 		type: Model.ElementType.Parameter,
-		parameterType: node.contents.parameterType,
+		parameterType: writeParameterType(live),
 	})
 }
 
@@ -150,12 +171,53 @@ export class ForaApi {
 		this.#retrying = false
 
 		this.#startHeartbeat(client)
-		await this.#seedValues(client)
+		// Before the walk: relabelling rebuilds the definitions the walk resolves against.
+		await this.#loadChoiceLabels(client, spec)
+		if (this.#client !== client) return
+		await this.#seedValues(client, spec)
+	}
+
+	// Reads the enum labels the unit publishes as strings (renameable LUT slots). A label that won't
+	// read keeps its table text, so a unit without the option fitted shows the static names.
+	async #loadChoiceLabels(client: EmberClient, spec: ModelSpec): Promise<void> {
+		if (spec.choiceLabelSources.length === 0) return
+		const started = Date.now()
+
+		const labels = new Map<string, ReadonlyMap<number, string>>()
+		let read = 0
+		for (const source of spec.choiceLabelSources) {
+			const resolved = new Map<number, string>(source.fixedLabels)
+			await runPool([...source.labelPaths], POPULATE_CONCURRENCY, async ([id, path]) => {
+				if (this.#client !== client) return
+				const label = await this.#readLabel(client, path)
+				if (label === undefined) return
+				resolved.set(id, label)
+				read++
+			})
+			if (this.#client !== client) return
+			for (const key of source.controlKeys) labels.set(key, resolved)
+		}
+
+		this.#self.log('debug', `Read ${read} device-supplied enum labels in ${Date.now() - started}ms`)
+		this.#self.applyChoiceLabels(labels)
+	}
+
+	async #readLabel(client: EmberClient, path: string): Promise<string | undefined> {
+		try {
+			const node = await client.getElementByPath(path, undefined, PATH_DELIMITER)
+			const contents = node?.contents
+			if (contents?.type !== Model.ElementType.Parameter) return undefined
+			const value = contents.value
+			return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+		} catch (error) {
+			this.#self.log('debug', `Label "${path}" not read: ${errorMessage(error)}`)
+			return undefined
+		}
 	}
 
 	// Reads every declared parameter, then subscribes. Actions, feedbacks and variables already
 	// exist at this point — this only fills them in.
-	async #seedValues(client: EmberClient): Promise<void> {
+	async #seedValues(client: EmberClient, spec: ModelSpec): Promise<void> {
 		this.#live.clear()
 		const started = Date.now()
 
@@ -165,7 +227,11 @@ export class ForaApi {
 		const stats = await walkDefinitions(
 			client,
 			groups,
-			{ concurrency: POPULATE_CONCURRENCY, maxAttempts: WALK_MAX_ATTEMPTS },
+			{
+				concurrency: POPULATE_CONCURRENCY,
+				maxAttempts: WALK_MAX_ATTEMPTS,
+				dirFieldMask: (path) => (isTruncatedDirectory(spec, path) ? IDENTIFIER_AND_VALUE_MASK : undefined),
+			},
 			{
 				onParameter: (def, node) => {
 					this.#self.state.set(def.id, formatValue(def.control, node.contents.value))
@@ -193,8 +259,9 @@ export class ForaApi {
 		}
 		this.#self.log(
 			'debug',
-			`Loaded ${stats.requested} directories in ${Date.now() - started}ms; pruned ${stats.pruned} under ` +
-				`absent parents, retried ${stats.retried}, gave up on ${stats.failed}`,
+			`Loaded ${stats.requested} directories in ${Date.now() - started}ms ` +
+				`(${stats.masked} field-masked, ${stats.filled} children filled); ` +
+				`pruned ${stats.pruned} under absent parents, retried ${stats.retried}, gave up on ${stats.failed}`,
 		)
 		this.#self.log(
 			'debug',
@@ -287,7 +354,7 @@ export class ForaApi {
 			return
 		}
 		try {
-			const request = await client.setValue(writeTarget(live.node), value)
+			const request = await client.setValue(writeTarget(live), value)
 			// The acknowledgement is a second promise, and an unhandled rejection from it would kill
 			// the module process. Not awaited — the subscription already carries the value back.
 			request.response?.catch((error: unknown) => {

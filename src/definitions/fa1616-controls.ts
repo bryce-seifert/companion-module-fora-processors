@@ -4,6 +4,18 @@ import { pad, range } from './shared.js'
 // Event 001–100, labeled to match the device's event-name nodes.
 const eventChoices = (): (readonly [number, string])[] => range(1, 100).map((i) => [i, `Event ${pad(i, 3)}`])
 
+// Fallback labels for the 1D-LUT slots; a connected unit names its own (see `choiceLabelSources`).
+// Wire values are zero-based, one below the manual: gamma 0-49 User / 50-59 Preset, colour 0-9 / 10-12.
+const gammaCurveChoices = (): (readonly [number, string])[] => [
+	...range(1, 50).map((i): readonly [number, string] => [i - 1, `User ${pad(i, 2)}`]),
+	...range(1, 10).map((i): readonly [number, string] => [49 + i, `Preset ${pad(i, 2)}`]),
+]
+
+const colorSpaceChoices = (): (readonly [number, string])[] => [
+	...range(1, 10).map((i): readonly [number, string] => [i - 1, `User ${pad(i, 2)}`]),
+	...range(1, 3).map((i): readonly [number, string] => [9 + i, `Preset ${pad(i, 2)}`]),
+]
+
 // FA-1616 control metadata, keyed by the definition's group key (or its id when ungrouped)
 
 export const FA1616_CONTROLS: Record<string, ControlSpec> = {
@@ -36,56 +48,14 @@ export const FA1616_CONTROLS: Record<string, ControlSpec> = {
 	cp_diff_white: num('readwrite', { min: 0, max: 2000, factor: 10, unit: '%' }),
 	// CP Dynamic Range Gain — 32 instances, from FA-9600 dr_gain
 	cp_dr_gain: num('readwrite', { min: -2400, max: 2400, factor: 100, unit: 'dB' }),
-	// CP Input Color Space — 32 instances, from FA-9600 lut_in_color
-	cp_in_color: choice('readwrite', [
-		[0, 'Rec. ITU-R BT.709'],
-		[1, 'Rec. ITU-R BT.2020'],
-		[2, 'User 1'],
-		[3, 'User 2'],
-		[4, 'User 3'],
-		[5, 'User 4'],
-		[6, 'User 5'],
-	]),
-	// CP Input Gamma (EOTF) — 32 instances, from FA-9600 lut_in_gamma
-	cp_in_gamma: choice('readwrite', [
-		[1, 'User 01'],
-		[2, 'User 02'],
-		[3, 'User 03'],
-		[4, 'User 04'],
-		[5, 'User 05'],
-		[6, 'User 06'],
-		[7, 'User 07'],
-		[8, 'User 08'],
-		[9, 'User 09'],
-		[10, 'User 10'],
-		[11, 'S-Log3 Live HDR'],
-		[13, 'SDR (SONY)'],
-	]),
-	// CP Output Color Space — 32 instances, from FA-9600 lut_out_color
-	cp_out_color: choice('readwrite', [
-		[0, 'Rec. ITU-R BT.709'],
-		[1, 'Rec. ITU-R BT.2020'],
-		[2, 'User 1'],
-		[3, 'User 2'],
-		[4, 'User 3'],
-		[5, 'User 4'],
-		[6, 'User 5'],
-	]),
-	// CP Output Gamma (OETF) — 32 instances, from FA-9600 lut_out_gamma
-	cp_out_gamma: choice('readwrite', [
-		[1, 'User 01'],
-		[2, 'User 02'],
-		[3, 'User 03'],
-		[4, 'User 04'],
-		[5, 'User 05'],
-		[6, 'User 06'],
-		[7, 'User 07'],
-		[8, 'User 08'],
-		[9, 'User 09'],
-		[10, 'User 10'],
-		[11, 'S-Log3 Live HDR'],
-		[13, 'SDR (SONY)'],
-	]),
+	// CP Input Color Space — 32 instances
+	cp_in_color: choice('readwrite', colorSpaceChoices()),
+	// CP Input Gamma (EOTF) — 32 instances
+	cp_in_gamma: choice('readwrite', gammaCurveChoices()),
+	// CP Output Color Space — 32 instances
+	cp_out_color: choice('readwrite', colorSpaceChoices()),
+	// CP Output Gamma (OETF) — 32 instances
+	cp_out_gamma: choice('readwrite', gammaCurveChoices()),
 	// CP CC Black Level Blue — 96 instances
 	cp_postbal_black: num('readwrite', { min: 0, max: 2000, factor: 10, unit: '%' }),
 	// CP CC Gamma Level Blue — 96 instances

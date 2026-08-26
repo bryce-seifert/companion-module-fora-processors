@@ -3,6 +3,7 @@ import {
 	type CompanionBooleanFeedbackDefinition,
 	type CompanionFeedbackDefinitions,
 	type CompanionFeedbackInfo,
+	type CompanionVariableValue,
 } from '@companion-module/base'
 import { isReadable } from './definitions/controls.js'
 import { CATEGORY } from './definitions/shared.js'
@@ -32,12 +33,24 @@ type BooleanFeedbackBase = Omit<CompanionBooleanFeedbackDefinition, 'options' | 
 function trackSubscription(self: ModuleInstance, logical: LogicalControl) {
 	return {
 		subscribe: (feedback: CompanionFeedbackInfo) => {
-			self.state.registerFeedback(resolveId(logical, feedback.options), feedback.id)
+			self.state.trackFeedback(feedback.id, resolveId(logical, feedback.options))
 		},
 		unsubscribe: (feedback: CompanionFeedbackInfo) => {
-			self.state.unregisterFeedback(resolveId(logical, feedback.options), feedback.id)
+			self.state.untrackFeedback(feedback.id)
 		},
 	}
+}
+
+// The value a placed feedback reads, re-pointing it at that id as a side effect: Companion runs
+// `subscribe` only on insert, so an edited feedback would otherwise still watch its original target.
+function readTracked(
+	self: ModuleInstance,
+	logical: LogicalControl,
+	feedback: CompanionFeedbackInfo,
+): CompanionVariableValue | undefined {
+	const id = resolveId(logical, feedback.options)
+	self.state.trackFeedback(feedback.id, id)
+	return self.state.get(id)
 }
 
 function commonFeedback(self: ModuleInstance, logical: LogicalControl): BooleanFeedbackBase {
@@ -54,7 +67,7 @@ function booleanFeedback(self: ModuleInstance, logical: LogicalControl): Compani
 	return {
 		...commonFeedback(self, logical),
 		options: selectorFields(logical),
-		callback: (feedback) => self.state.get(resolveId(logical, feedback.options)) === true,
+		callback: (feedback) => readTracked(self, logical, feedback) === true,
 	}
 }
 
@@ -67,7 +80,7 @@ function enumFeedback(self: ModuleInstance, logical: LogicalControl): CompanionB
 		// State holds the enum's label, not its index.
 		callback: (feedback) => {
 			const choice = choices.find((c) => c.id === Number(feedback.options.value))
-			return choice !== undefined && self.state.get(resolveId(logical, feedback.options)) === choice.label
+			return choice !== undefined && readTracked(self, logical, feedback) === choice.label
 		},
 	}
 }
@@ -82,7 +95,7 @@ function numberFeedback(self: ModuleInstance, logical: LogicalControl): Companio
 			numberValueField(unit),
 		],
 		callback: (feedback) => {
-			const current = Number(self.state.get(resolveId(logical, feedback.options)))
+			const current = Number(readTracked(self, logical, feedback))
 			if (Number.isNaN(current)) return false
 			const operator = isNumberCompareOperator(feedback.options.operator) ? feedback.options.operator : 'eq'
 			return compareNumber(operator, current, Number(feedback.options.value))
@@ -95,7 +108,7 @@ function stringFeedback(self: ModuleInstance, logical: LogicalControl): Companio
 		...commonFeedback(self, logical),
 		options: [...selectorFields(logical), { type: 'textinput', id: 'value', label: 'Value', default: '' }],
 		callback: (feedback) => {
-			const current = self.state.get(resolveId(logical, feedback.options))
+			const current = readTracked(self, logical, feedback)
 			return String(current ?? '') === String(feedback.options.value ?? '')
 		},
 	}
