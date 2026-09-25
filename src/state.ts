@@ -28,16 +28,16 @@ export function buildDefinitions(model: ModelId | undefined, choiceLabels: Choic
 	if (choiceLabels.size === 0) return definitions
 
 	// Instances of a parameter share one spec object; keep that so the relabelled spec is built once.
-	const relabelled = new Map<string, ControlSpec>()
+	const relabelled = new Map<ControlSpec, ControlSpec>()
 	return definitions.map((def) => {
 		const key = controlKeyOf(def)
 		const labels = choiceLabels.get(key)
 		if (!labels || def.control.kind !== 'enum') return def
 
-		let spec = relabelled.get(key)
+		let spec = relabelled.get(def.control)
 		if (!spec) {
 			spec = relabelChoices(def.control, labels)
-			relabelled.set(key, spec)
+			relabelled.set(def.control, spec)
 		}
 		return { ...def, control: spec }
 	})

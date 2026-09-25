@@ -271,16 +271,20 @@ function freezeDefinitions(): DefinitionDraft[] {
 // Input select is the one parameter whose choices differ between instances: each PRU sees only
 // its own SDI/IP bus. Block-A (1-4) reads the A bus, Block-B (101-104) the B bus, and Block-C
 // (201-204) reaches both, with the B bus offset by 100.
-function inputSelectSpec(n: number): EnumSpec {
-	const bus = (label: string, offset: number) =>
-		[
-			...range(1, 8).map((i) => [offset + i - 1, `SDI ${label}${i}`] as const),
-			...range(1, 8).map((i) => [offset + 16 + i - 1, `IP ${label}${i}`] as const),
-			...range(1, 4).map((i) => [offset + 24 + i - 1, `RECV ${label === 'A' ? 2 : 4}-${i}`] as const),
-		] as const
+// One spec object per block: instances sharing a spec also share their action/feedback value field.
+const inputBus = (label: string, offset: number) =>
+	[
+		...range(1, 8).map((i) => [offset + i - 1, `SDI ${label}${i}`] as const),
+		...range(1, 8).map((i) => [offset + 16 + i - 1, `IP ${label}${i}`] as const),
+		...range(1, 4).map((i) => [offset + 24 + i - 1, `RECV ${label === 'A' ? 2 : 4}-${i}`] as const),
+	] as const
+const INPUT_SELECT_A = choice('readwrite', inputBus('A', 0))
+const INPUT_SELECT_B = choice('readwrite', inputBus('B', 0))
+const INPUT_SELECT_C = choice('readwrite', [...inputBus('A', 0), ...inputBus('B', 100)])
 
-	if (n >= 200) return choice('readwrite', [...bus('A', 0), ...bus('B', 100)])
-	return n >= 100 ? choice('readwrite', bus('B', 0)) : choice('readwrite', bus('A', 0))
+function inputSelectSpec(n: number): EnumSpec {
+	if (n >= 200) return INPUT_SELECT_C
+	return n >= 100 ? INPUT_SELECT_B : INPUT_SELECT_A
 }
 
 // VERIFY: manual's CSV lost identifiers for the `path` block; these follow the Functions-table paths.

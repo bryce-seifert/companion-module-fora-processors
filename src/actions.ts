@@ -1,10 +1,11 @@
 import type { CompanionActionDefinition, CompanionActionDefinitions } from '@companion-module/base'
 import { isWritable } from './definitions/controls.js'
-import { actionId, resolveId, selectorFields, type LogicalControl } from './logical-controls.js'
+import { actionId, resolveId, selectorFields, valueOption, type LogicalControl } from './logical-controls.js'
 import type { ModuleInstance } from './main.js'
 import {
 	BOOLEAN_ACTION_MODES,
 	dropdownField,
+	enumValueFields,
 	isBooleanActionMode,
 	isNumberActionMode,
 	NUMBER_ACTION_MODES,
@@ -50,13 +51,12 @@ function booleanAction(self: ModuleInstance, logical: LogicalControl): Companion
 }
 
 function enumAction(self: ModuleInstance, logical: LogicalControl): CompanionActionDefinition {
-	const choices =
-		logical.spec.kind === 'enum' ? logical.spec.choices.map((choice) => ({ id: choice.id, label: choice.label })) : []
 	return {
 		name: logical.displayName,
-		options: [...selectorFields(logical), dropdownField('value', logical.name, choices, choices[0]?.id ?? 0)],
+		options: [...selectorFields(logical), ...enumValueFields(logical)],
 		callback: async (event) => {
-			await self.api.setEnum(resolveId(logical, event.options), Number(event.options.value))
+			const id = resolveId(logical, event.options)
+			await self.api.setEnum(id, Number(valueOption(logical, id, event.options)))
 		},
 	}
 }

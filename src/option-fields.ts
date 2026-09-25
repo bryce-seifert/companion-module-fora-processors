@@ -1,4 +1,5 @@
 import type { CompanionInputFieldDropdown, CompanionInputFieldNumber } from '@companion-module/base'
+import type { LogicalControl } from './logical-controls.js'
 
 /** Shared upper/lower bound for free-form number option fields in actions and feedbacks. */
 export const NUMBER_OPTION_LIMIT = 1_000_000_000
@@ -78,4 +79,18 @@ export function isNumberActionMode(value: unknown): value is NumberActionMode {
 
 export function isNumberCompareOperator(value: unknown): value is NumberCompareOperator {
 	return value === 'eq' || value === 'gt' || value === 'gte' || value === 'lt' || value === 'lte'
+}
+
+/** One choice dropdown per spec variant of an enum control, each visible only where it applies. */
+export function enumValueFields(logical: LogicalControl): CompanionInputFieldDropdown[] {
+	return logical.specVariants.flatMap((variant) => {
+		if (variant.spec.kind !== 'enum') return []
+		const choices = variant.spec.choices.map((choice) => ({ id: choice.id, label: choice.label }))
+		return [
+			{
+				...dropdownField(variant.fieldId, logical.name, choices, choices[0]?.id ?? 0),
+				isVisibleExpression: variant.isVisibleExpression,
+			},
+		]
+	})
 }

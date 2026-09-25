@@ -7,11 +7,19 @@ import {
 } from '@companion-module/base'
 import { isReadable } from './definitions/controls.js'
 import { CATEGORY } from './definitions/shared.js'
-import { feedbackId, resolveId, selectorFields, type LogicalControl } from './logical-controls.js'
+import {
+	feedbackId,
+	resolveId,
+	selectorFields,
+	specVariantFor,
+	valueOption,
+	type LogicalControl,
+} from './logical-controls.js'
 import type { ModuleInstance } from './main.js'
 import {
 	compareNumber,
 	dropdownField,
+	enumValueFields,
 	isNumberCompareOperator,
 	NUMBER_COMPARE_OPERATORS,
 	numberValueField,
@@ -72,14 +80,15 @@ function booleanFeedback(self: ModuleInstance, logical: LogicalControl): Compani
 }
 
 function enumFeedback(self: ModuleInstance, logical: LogicalControl): CompanionBooleanFeedbackDefinition {
-	const choices =
-		logical.spec.kind === 'enum' ? logical.spec.choices.map((choice) => ({ id: choice.id, label: choice.label })) : []
 	return {
 		...commonFeedback(self, logical),
-		options: [...selectorFields(logical), dropdownField('value', logical.name, choices, choices[0]?.id ?? 0)],
+		options: [...selectorFields(logical), ...enumValueFields(logical)],
 		// State holds the enum's label, not its index.
 		callback: (feedback) => {
-			const choice = choices.find((c) => c.id === Number(feedback.options.value))
+			const id = resolveId(logical, feedback.options)
+			const { spec } = specVariantFor(logical, id)
+			const value = Number(valueOption(logical, id, feedback.options))
+			const choice = spec.kind === 'enum' ? spec.choices.find((c) => c.id === value) : undefined
 			return choice !== undefined && readTracked(self, logical, feedback) === choice.label
 		},
 	}
