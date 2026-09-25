@@ -14,6 +14,7 @@ import {
 	feedbackId,
 	optionsFromCombo,
 	resolveId,
+	specVariantFor,
 	type LogicalControl,
 	type SelectorCombo,
 } from './logical-controls.js'
@@ -217,13 +218,15 @@ function addPathRoutingEnum(
 
 			addDivider(presets, comboKey, category, headerContext || `${logical.name} ${categoryContext}`)
 
-			for (const choice of choices) {
+			const variant = specVariantFor(logical, resolveId(logical, comboOptions))
+			const comboChoices = variant.spec.kind === 'enum' ? variant.spec.choices : choices
+			for (const choice of comboChoices) {
 				addEnumChoiceButton(presets, logical, interactive, showsFeedback, {
 					presetKey: `${comboKey}_${choice.id}`,
 					category,
 					name: `${logical.name} ${categoryContext}${headerContext ? ` ${headerContext}` : ''}: ${choice.label}`,
 					buttonText: `${buttonContext}\n${choice.label}`,
-					options: { ...comboOptions, value: choice.id },
+					options: { ...comboOptions, [variant.fieldId]: choice.id },
 				})
 			}
 		}
