@@ -163,8 +163,21 @@ function colorProcessorDefinitions(): DefinitionDraft[] {
 		}
 	}
 
+	// The device's Ember+ tree has dr-gain and sdr-gain swapped relative to its UI.
+	const GAIN_EMBER_LEAF: Record<string, string> = {
+		'dr-gain': 'sdr-gain',
+		'sdr-gain': 'dr-gain',
+		'total-gain': 'total-gain',
+	}
 	for (const g of ['dr-gain', 'sdr-gain', 'total-gain']) {
-		addColorProc(defs, PRU_VIDEO, g.replace('-', '_'), GAIN_NAME[g], `gain/${g}`, CATEGORY.SIGNAL_PROCESSING)
+		addColorProc(
+			defs,
+			PRU_VIDEO,
+			g.replace('-', '_'),
+			GAIN_NAME[g],
+			`gain/${GAIN_EMBER_LEAF[g]}`,
+			CATEGORY.SIGNAL_PROCESSING,
+		)
 	}
 
 	// gamma-color node: CC bypass = "conversion"; colour space + gamma are EOTF/OETF in/out.
