@@ -143,6 +143,33 @@ function activeFeedbacks(
 	return [{ feedbackId: feedbackId(logical), options, style: ACTIVE_STYLE }]
 }
 
+// Booleans that get a toggle per instance (every selector combo) rather than one for the default.
+const PER_INSTANCE_BOOLEAN_KEYS = new Set(['aud_fade'])
+
+function addPerInstanceBoolean(
+	self: ModuleInstance,
+	presets: CompanionPresetDefinitions,
+	logical: LogicalControl,
+	interactive: boolean,
+): void {
+	const category = logical.category ?? ''
+	addDivider(presets, logical.key, category, logical.name)
+	for (const combo of expandChoices(logical.selectors)) {
+		const options = optionsFromCombo(combo)
+		const context = selectorContext(combo)
+		const key = `${logical.key}_${combo.map((entry) => entry.id).join('_')}`
+		const valueRef = `$(${self.label}:${resolveId(logical, options)})`
+		presets[key] = {
+			type: 'button',
+			category,
+			name: `${logical.name} ${context}`,
+			style: buttonStyle(`${logical.name}\n${context}\n${valueRef}`, interactive),
+			steps: pressSteps(logical, { ...options, mode: 'toggle' }, interactive),
+			feedbacks: activeFeedbacks(logical, options, isReadable(logical.spec)),
+		}
+	}
+}
+
 function addBoolean(
 	self: ModuleInstance,
 	presets: CompanionPresetDefinitions,
@@ -383,7 +410,8 @@ export function UpdatePresets(self: ModuleInstance): void {
 
 		switch (logical.spec.kind) {
 			case 'boolean':
-				addBoolean(self, presets, logical, interactive)
+				if (PER_INSTANCE_BOOLEAN_KEYS.has(logical.key)) addPerInstanceBoolean(self, presets, logical, interactive)
+				else addBoolean(self, presets, logical, interactive)
 				break
 			case 'enum':
 				// addEnum manages its own divider(s) — Path & Routing / FS enums split into one per instance.

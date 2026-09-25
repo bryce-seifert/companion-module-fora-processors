@@ -322,6 +322,13 @@ function audioDefinitions(): DefinitionDraft[] {
 	const chSel = (ch: number): GroupSelector => ({ dim: 'ch', value: pad(ch, 2), label: `Ch ${pad(ch, 2)}` })
 
 	for (const n of PRU_AUDIO) {
+		defs.push({
+			id: `aud_fade_${pruTag(n)}`,
+			name: `Audio Fade In/Out ${pruNameSuffix(n)}`,
+			path: `${AUDIO}/audio-gain/audio-gain-${n}/fade`,
+			category: CATEGORY.AUDIO_FADE,
+			group: { key: 'aud_fade', name: 'Audio Fade In/Out', selectors: [pruSelector(n)] },
+		})
 		for (const g of range(1, 4)) {
 			// Channels are numbered 01–64 continuously, 16 per group.
 			for (const ch of range((g - 1) * 16 + 1, g * 16)) {

@@ -21,6 +21,8 @@ const colorSpaceChoices = (): (readonly [number, string])[] => [
 export const FA1616_CONTROLS: Record<string, ControlSpec> = {
 	// Per-Channel Delay (Embedded) — 768 instances
 	aud_delay: num('readwrite', { min: 1, max: 1000, factor: 1, unit: 'ms' }),
+	// Audio Fade In/Out — 12 instances
+	aud_fade: bool('readwrite'),
 	// Per-Channel Gain (Embedded) — 768 instances
 	aud_gain: num('readwrite', { min: -200, max: 200, factor: 10, unit: 'dB' }),
 	// Mute (Per Group/PRU) — 48 instances

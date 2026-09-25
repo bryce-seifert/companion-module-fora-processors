@@ -356,10 +356,19 @@ export class ForaApi {
 		try {
 			const request = await client.setValue(writeTarget(live), value)
 			// The acknowledgement is a second promise, and an unhandled rejection from it would kill
-			// the module process. Not awaited — the subscription already carries the value back.
-			request.response?.catch((error: unknown) => {
-				this.#self.log('debug', `No acknowledgement for ${live.def.id}: ${errorMessage(error)}`)
-			})
+			// the module process. Not awaited. Some parameters (1616 audio `fade`) never notify their
+			// subscription, so the value the acknowledgement carries back is applied too.
+			request.response
+				?.then((updated) => {
+					if (this.#client !== client) return
+					if (updated?.contents.type !== Model.ElementType.Parameter) return
+					if (updated.contents.value === undefined) return
+					live.latestRaw = updated.contents.value
+					this.#self.state.set(live.def.id, formatValue(live.def.control, updated.contents.value))
+				})
+				.catch((error: unknown) => {
+					this.#self.log('debug', `No acknowledgement for ${live.def.id}: ${errorMessage(error)}`)
+				})
 		} catch (error) {
 			this.#self.log('warn', `Failed to set ${live.def.id}: ${errorMessage(error)}`)
 		}

@@ -46,6 +46,7 @@ export function attachControls(
 export const CATEGORY = {
 	SIGNAL_PROCESSING: 'Signal Processing',
 	PATH_ROUTING: 'Path & Routing',
+	AUDIO_FADE: 'Audio - Fade',
 	SYNCHRONIZATION: 'Synchronization',
 	SIGNAL_STATUS: 'Signal Status',
 	UTILITIES: 'Utilities',
