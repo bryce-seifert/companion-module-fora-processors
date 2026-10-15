@@ -1,17 +1,22 @@
 import { InstanceStatus } from '@companion-module/base'
+import type { Socket } from 'node:net'
 import { EmberClient, Model, Types } from 'emberplus-connection'
 import { isWritable, type ControlSpec } from './definitions/controls.js'
 import type { ModuleInstance } from './main.js'
 import { describeIdentitySource, getModelSpec, isTruncatedDirectory, type ModelSpec } from './models.js'
-import { formatValue, groupByParent, PATH_DELIMITER, type ParentGroupMember, type VariableDefinition } from './state.js'
-import { errorMessage } from './util.js'
-import { walkDefinitions, type DirFieldMask } from './walk.js'
+import { formatValue, groupByParent, PATH_DELIMITER, type VariableDefinition } from './state.js'
+import { errorMessage, withDeadline } from './util.js'
+import { walkTree, type DirFieldMask } from './walk.js'
 
 const RECONNECT_INTERVAL_MS = 5000
-const POPULATE_CONCURRENCY = 32
-const REQUEST_TIMEOUT_MS = 10000
+const POPULATE_CONCURRENCY = 64
+// The 1616 answers within 400ms but silently drops a few percent of requests under load; a short
+// timeout plus retries recovers those far faster than waiting out a long one.
+const REQUEST_TIMEOUT_MS = 2000
+// The library checks timeouts once a second, so its own timeout can land up to a second late.
+const REQUEST_DEADLINE_MS = REQUEST_TIMEOUT_MS + 2000
 const HEARTBEAT_INTERVAL_MS = 8000
-const WALK_MAX_ATTEMPTS = 3
+const WALK_MAX_ATTEMPTS = 5
 
 // dirFieldMask 5 (Identifier | Value) keeps a truncated directory inside one frame. The library
 // spells that integer 'CONNECTIONS'; the name is wrong for what we ask, the wire value is what counts.
@@ -20,11 +25,18 @@ const IDENTIFIER_AND_VALUE_MASK = 'CONNECTIONS' as DirFieldMask
 // A definition matched to the live parameter node it resolved to. The node is what `setValue` and
 // `subscribe` need; everything else comes from `def.control`.
 interface LiveParameter {
-	readonly def: VariableDefinition
+	// Replaced when the labels read on this connection relabel the definitions.
+	def: VariableDefinition
 	readonly node: Model.NumberedTreeNode<Model.Parameter>
 	// Un-scaled, pre-enum-label value, kept current for adjust/toggle.
 	latestRaw: Types.EmberValue | undefined
 }
+
+// What the walk resolves: a declared parameter, or the string naming one enum choice (renameable
+// LUT slots). Labels ride along so their parents are listed in the same pool as everything else.
+type WalkTarget =
+	| { readonly kind: 'parameter'; readonly leaf: string; readonly def: VariableDefinition }
+	| { readonly kind: 'label'; readonly leaf: string; readonly id: number; readonly into: Map<number, string> }
 
 // Run `worker` over `items` with at most `limit` promises in flight at a time.
 async function runPool<T>(items: readonly T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
@@ -76,6 +88,58 @@ function writeTarget(live: LiveParameter): Model.QualifiedElement<Model.Paramete
 		type: Model.ElementType.Parameter,
 		parameterType: writeParameterType(live),
 	})
+}
+
+// The private S101 socket inside an EmberClient (emberplus-connection 0.3.x).
+interface S101SocketInternals {
+	socket?: Socket
+	_autoReconnect: boolean
+	_clearConnectionAttemptTimer(): void
+	connect(): Promise<void | Error>
+}
+
+// The S101 socket runs its own reconnect timer (every 5s, 60 tries) that `disconnect()` and
+// `discard()` never clear when the socket isn't connected. A discarded client would then keep
+// dialling, connect when the unit comes back, and stay open on keepalives forever. Since we build a
+// new client per attempt, stop the old socket from ever connecting again.
+function stopSocketReconnects(client: EmberClient): S101SocketInternals {
+	const socket = (client as unknown as { _client: S101SocketInternals })._client
+	socket._autoReconnect = false
+	socket._clearConnectionAttemptTimer()
+	// Also covers the retry a pending connect timeout and a socket close each trigger.
+	socket.connect = async () => undefined
+	return socket
+}
+
+// Groups every declared parameter and every label path by parent. `choiceLabels` fills in as the
+// walk reads label strings, each source starting from the labels the unit can't supply.
+function buildWalkTargets(
+	definitions: readonly VariableDefinition[],
+	spec: ModelSpec,
+): { groups: Map<string, WalkTarget[]>; choiceLabels: Map<string, ReadonlyMap<number, string>> } {
+	const groups = new Map<string, WalkTarget[]>()
+	for (const [parent, members] of groupByParent(definitions)) {
+		groups.set(
+			parent,
+			members.map(({ leaf, def }) => ({ kind: 'parameter', leaf, def })),
+		)
+	}
+
+	const choiceLabels = new Map<string, ReadonlyMap<number, string>>()
+	for (const source of spec.choiceLabelSources) {
+		const into = new Map<number, string>(source.fixedLabels)
+		for (const key of source.controlKeys) choiceLabels.set(key, into)
+		for (const [id, path] of source.labelPaths) {
+			const segments = path.split(PATH_DELIMITER)
+			const leaf = segments.pop()
+			if (leaf === undefined) continue
+			const parent = segments.join(PATH_DELIMITER)
+			const members = groups.get(parent) ?? []
+			members.push({ kind: 'label', leaf, id, into })
+			groups.set(parent, members)
+		}
+	}
+	return { groups, choiceLabels }
 }
 
 export class ForaApi {
@@ -171,75 +235,48 @@ export class ForaApi {
 		this.#retrying = false
 
 		this.#startHeartbeat(client)
-		// Before the walk: relabelling rebuilds the definitions the walk resolves against.
-		await this.#loadChoiceLabels(client, spec)
-		if (this.#client !== client) return
 		await this.#seedValues(client, spec)
 	}
 
-	// Reads the enum labels the unit publishes as strings (renameable LUT slots). A label that won't
-	// read keeps its table text, so a unit without the option fitted shows the static names.
-	async #loadChoiceLabels(client: EmberClient, spec: ModelSpec): Promise<void> {
-		if (spec.choiceLabelSources.length === 0) return
-		const started = Date.now()
-
-		const labels = new Map<string, ReadonlyMap<number, string>>()
-		let read = 0
-		for (const source of spec.choiceLabelSources) {
-			const resolved = new Map<number, string>(source.fixedLabels)
-			await runPool([...source.labelPaths], POPULATE_CONCURRENCY, async ([id, path]) => {
-				if (this.#client !== client) return
-				const label = await this.#readLabel(client, path)
-				if (label === undefined) return
-				resolved.set(id, label)
-				read++
-			})
-			if (this.#client !== client) return
-			for (const key of source.controlKeys) labels.set(key, resolved)
-		}
-
-		this.#self.log('debug', `Read ${read} device-supplied enum labels in ${Date.now() - started}ms`)
-		this.#self.applyChoiceLabels(labels)
-	}
-
-	async #readLabel(client: EmberClient, path: string): Promise<string | undefined> {
-		try {
-			const node = await client.getElementByPath(path, undefined, PATH_DELIMITER)
-			const contents = node?.contents
-			if (contents?.type !== Model.ElementType.Parameter) return undefined
-			const value = contents.value
-			return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
-		} catch (error) {
-			this.#self.log('debug', `Label "${path}" not read: ${errorMessage(error)}`)
-			return undefined
-		}
-	}
-
-	// Reads every declared parameter, then subscribes. Actions, feedbacks and variables already
-	// exist at this point — this only fills them in.
+	// Reads every declared parameter and the unit's enum labels in one walk, then subscribes.
+	// Actions, feedbacks and variables already exist at this point — this only fills them in.
 	async #seedValues(client: EmberClient, spec: ModelSpec): Promise<void> {
 		this.#live.clear()
 		const started = Date.now()
 
 		const absentByKey = new Map<string, { count: number; sample: string }>()
-		const groups: Map<string, ParentGroupMember[]> = groupByParent(this.#self.definitions)
+		const { groups, choiceLabels } = buildWalkTargets(this.#self.definitions, spec)
+		let labelsRead = 0
 
-		const stats = await walkDefinitions(
+		const stats = await walkTree(
 			client,
 			groups,
 			{
 				concurrency: POPULATE_CONCURRENCY,
 				maxAttempts: WALK_MAX_ATTEMPTS,
 				dirFieldMask: (path) => (isTruncatedDirectory(spec, path) ? IDENTIFIER_AND_VALUE_MASK : undefined),
+				requestDeadlineMs: REQUEST_DEADLINE_MS,
 			},
 			{
-				onParameter: (def, node) => {
-					this.#self.state.set(def.id, formatValue(def.control, node.contents.value))
-					this.#live.set(def.id, { def, node, latestRaw: node.contents.value })
+				onParameter: (target, node) => {
+					const value = node.contents.value
+					if (target.kind === 'label') {
+						// A label that won't read keeps its table text, so a unit without the option
+						// fitted shows the static names.
+						if (typeof value !== 'string' || value.trim() === '') return
+						target.into.set(target.id, value.trim())
+						labelsRead++
+						return
+					}
+					const { def } = target
+					this.#self.state.set(def.id, formatValue(def.control, value))
+					this.#live.set(def.id, { def, node, latestRaw: value })
 				},
 				// Expected: subtrees are config-dependent and option blocks may be unfitted. The
 				// action stays in the UI either way; setting one that isn't there just warns.
-				onAbsent: (def) => {
+				onAbsent: (target) => {
+					if (target.kind === 'label') return
+					const { def } = target
 					const key = def.group?.key ?? def.id
 					const tally = absentByKey.get(key) ?? { count: 0, sample: def.path }
 					tally.count++
@@ -251,6 +288,11 @@ export class ForaApi {
 		)
 
 		if (this.#client !== client) return
+
+		if (choiceLabels.size > 0) {
+			this.#self.applyChoiceLabels(choiceLabels)
+			this.#rebindDefinitions()
+		}
 
 		let absentTotal = 0
 		for (const [key, { count, sample }] of [...absentByKey].sort((a, b) => b[1].count - a[1].count)) {
@@ -265,11 +307,24 @@ export class ForaApi {
 		)
 		this.#self.log(
 			'debug',
-			`Found ${this.#live.size}/${this.#self.definitions.length} parameters (${absentTotal} absent on this unit)`,
+			`Found ${this.#live.size}/${this.#self.definitions.length} parameters (${absentTotal} absent on this unit), ` +
+				`${labelsRead} device-supplied enum labels`,
 		)
 
 		// One request per parameter, so it runs after every value is already current as of its read.
 		await this.#subscribeAll(client)
+	}
+
+	// Relabelling replaces the definitions the walk resolved against; point what's already live at
+	// the new ones and reformat their values with the new labels.
+	#rebindDefinitions(): void {
+		const byId = new Map(this.#self.definitions.map((def) => [def.id, def]))
+		for (const live of this.#live.values()) {
+			const def = byId.get(live.def.id)
+			if (!def || def === live.def) continue
+			live.def = def
+			this.#self.state.set(def.id, formatValue(def.control, live.latestRaw))
+		}
 	}
 
 	async #subscribeAll(client: EmberClient): Promise<void> {
@@ -377,12 +432,22 @@ export class ForaApi {
 	// `getElementByPath` only matches nodes already in `client.tree`, so the root has to be loaded
 	// first or the first path segment fails to match and it silently returns undefined.
 	async #readDeviceId(client: EmberClient, spec: ModelSpec): Promise<string | undefined> {
-		await (
-			await client.getDirectory(client.tree)
-		).response
+		await withDeadline(
+			(async () => {
+				await (
+					await client.getDirectory(client.tree)
+				).response
+			})(),
+			REQUEST_DEADLINE_MS,
+			'root getDirectory',
+		)
 
 		const identityPath = spec.identity.kind === 'parameter' ? spec.identity.path : spec.identity.root
-		const node = await client.getElementByPath(identityPath, undefined, PATH_DELIMITER)
+		const node = await withDeadline(
+			client.getElementByPath(identityPath, undefined, PATH_DELIMITER),
+			REQUEST_DEADLINE_MS,
+			'identity lookup',
+		)
 		const contents = node?.contents
 		if (!contents) return undefined
 
@@ -463,9 +528,15 @@ export class ForaApi {
 
 		try {
 			// Await the response, not just the send: an unhandled rejection here would be fatal.
-			await (
-				await client.getDirectory(target)
-			).response
+			await withDeadline(
+				(async () => {
+					await (
+						await client.getDirectory(target)
+					).response
+				})(),
+				REQUEST_DEADLINE_MS,
+				'heartbeat',
+			)
 		} catch (_error) {
 			if (this.#client !== client) return
 			//this.#self.log('debug', `Heartbeat failed: ${errorMessage(error)}`)
@@ -481,12 +552,14 @@ export class ForaApi {
 	async #disposeClient(client: EmberClient): Promise<void> {
 		this.#stopHeartbeat()
 		client.removeAllListeners()
+		const socket = stopSocketReconnects(client)
 		try {
 			await client.disconnect()
 		} catch {
 			// Already disconnected or never connected; nothing to do.
 		}
 		client.discard()
+		socket.socket?.destroy()
 	}
 
 	// Permanently shut down the API. No reconnect will be scheduled afterwards.

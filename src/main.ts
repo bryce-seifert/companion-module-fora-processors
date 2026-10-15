@@ -36,6 +36,7 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	async destroy(): Promise<void> {
 		this.log('debug', 'destroy')
 		await this.api.destroy()
+		this.state.destroy()
 	}
 
 	async configUpdated(config: ModuleConfig): Promise<void> {

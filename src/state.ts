@@ -43,11 +43,18 @@ export function buildDefinitions(model: ModelId | undefined, choiceLabels: Choic
 	})
 }
 
+// The unit sends each value in its own frame (the 1616 alone pushes ~64 delay readings a second),
+// and every Companion call is an IPC message. Changes inside this window go out as one call.
+const FLUSH_INTERVAL_MS = 50
+
 // Tracks which placed feedback instances depend on which variable id, so a change to one id only
 // rechecks the feedbacks that actually read it (via `checkFeedbacksById`), not every instance.
 export class DeviceStateStore {
 	readonly #self: ModuleInstance
 	readonly #values = new Map<VariableId, CompanionVariableValue | undefined>()
+	#pendingValues: CompanionVariableValues = {}
+	#pendingFeedbackIds = new Set<string>()
+	#flushTimer: NodeJS.Timeout | null = null
 	readonly #feedbackIds = new Map<VariableId, Set<string>>()
 	// The reverse index, so re-pointing a feedback drops it from the id it used to read.
 	readonly #feedbackTargets = new Map<string, VariableId>()
@@ -59,10 +66,25 @@ export class DeviceStateStore {
 	set(id: VariableId, value: CompanionVariableValue | undefined): void {
 		if (this.#values.has(id) && this.#values.get(id) === value) return
 		this.#values.set(id, value)
-		this.#self.setVariableValues({ [id]: value ?? undefined })
+		this.#pendingValues[id] = value ?? undefined
+		for (const feedbackId of this.#feedbackIds.get(id) ?? []) this.#pendingFeedbackIds.add(feedbackId)
+		this.#flushTimer ??= setTimeout(() => this.#flush(), FLUSH_INTERVAL_MS)
+	}
 
-		const feedbackIds = this.#feedbackIds.get(id)
-		if (feedbackIds?.size) this.#self.checkFeedbacksById(...feedbackIds)
+	#flush(): void {
+		this.#cancelFlush()
+		const values = this.#pendingValues
+		const feedbackIds = this.#pendingFeedbackIds
+		this.#pendingValues = {}
+		this.#pendingFeedbackIds = new Set()
+		if (Object.keys(values).length > 0) this.#self.setVariableValues(values)
+		if (feedbackIds.size > 0) this.#self.checkFeedbacksById(...feedbackIds)
+	}
+
+	#cancelFlush(): void {
+		if (!this.#flushTimer) return
+		clearTimeout(this.#flushTimer)
+		this.#flushTimer = null
 	}
 
 	get(id: VariableId): CompanionVariableValue | undefined {
@@ -90,10 +112,22 @@ export class DeviceStateStore {
 	}
 
 	// Blanks every variable on disconnect; feedback subscriptions themselves survive reconnects.
+	// Nothing to blank once cleared, so each failed reconnect attempt doesn't resend every id.
 	clear(): void {
+		this.#pendingValues = {}
+		this.#pendingFeedbackIds.clear()
+		this.#cancelFlush()
+		if (this.#values.size === 0) return
 		this.#values.clear()
 		const blanks: CompanionVariableValues = {}
 		for (const def of this.#self.definitions) blanks[def.id] = undefined
 		this.#self.setVariableValues(blanks)
+	}
+
+	// Drops anything not yet sent; the instance is going away.
+	destroy(): void {
+		this.#pendingValues = {}
+		this.#pendingFeedbackIds.clear()
+		this.#cancelFlush()
 	}
 }

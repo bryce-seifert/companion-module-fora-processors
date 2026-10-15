@@ -1,7 +1,7 @@
 import type { EmberClient } from 'emberplus-connection'
 import { Model } from 'emberplus-connection'
-import { PATH_DELIMITER, type ParentGroupMember, type VariableDefinition } from './definitions/shared.js'
-import { errorMessage } from './util.js'
+import { PATH_DELIMITER } from './definitions/shared.js'
+import { DeadlineError, errorMessage, withDeadline } from './util.js'
 
 // The library's `FieldFlags` isn't re-exported from the package root (`Model` covers only the
 // element types), so take it from the signature that consumes it.
@@ -15,13 +15,20 @@ export interface WalkOptions {
 	// The field mask to list a directory with, or `undefined` for a full listing. Lets the caller
 	// restrict the reply for directories the device cannot serialise whole.
 	readonly dirFieldMask: (path: string) => DirFieldMask
+	// Our own cap on each library call, above the library's request timeout; see `withDeadline`.
+	readonly requestDeadlineMs: number
 }
 
-export interface WalkCallbacks {
-	// A definition that resolved to a live parameter node, with its contents already populated.
-	onParameter(def: VariableDefinition, node: Model.NumberedTreeNode<Model.Parameter>): void
-	// A definition whose parent loaded but which the unit does not carry.
-	onAbsent(def: VariableDefinition): void
+// Something to resolve: the leaf segment of a parameter path, grouped under its parent path.
+export interface WalkMember {
+	readonly leaf: string
+}
+
+export interface WalkCallbacks<M extends WalkMember> {
+	// A member that resolved to a live parameter node, with its contents already populated.
+	onParameter(member: M, node: Model.NumberedTreeNode<Model.Parameter>): void
+	// A member whose parent loaded but which the unit does not carry.
+	onAbsent(member: M): void
 	isCancelled(): boolean
 	log(level: 'debug' | 'warn', message: string): void
 	// Lets the caller yield the pool to latency-sensitive on-demand requests.
@@ -89,11 +96,11 @@ interface WalkTask {
 // complete contents (value, min/max, factor, enumeration, access), so definitions are resolved the
 // moment their parent lands rather than in a second pass. Directories that can't be listed whole are
 // the exception: they are listed with a field mask, then each parameter child is fetched on its own.
-export async function walkDefinitions(
+export async function walkTree<M extends WalkMember>(
 	client: EmberClient,
-	groups: Map<string, ParentGroupMember[]>,
+	groups: ReadonlyMap<string, readonly M[]>,
 	opts: WalkOptions,
-	cb: WalkCallbacks,
+	cb: WalkCallbacks<M>,
 ): Promise<WalkStats> {
 	const { roots, wantedChildren } = planDescent(groups.keys())
 	const stats: WalkStats = { requested: 0, masked: 0, filled: 0, pruned: 0, retried: 0, failed: 0 }
@@ -106,7 +113,7 @@ export async function walkDefinitions(
 	// costs one request rather than one per descendant. Definitions under it are reported absent
 	// here rather than in `seed`, which only ever sees parents that did load.
 	const prune = (path: string): void => {
-		for (const { def } of groups.get(path) ?? []) cb.onAbsent(def)
+		for (const member of groups.get(path) ?? []) cb.onAbsent(member)
 		const children = wantedChildren.get(path)
 		if (!children) return
 		stats.pruned += children.length
@@ -117,15 +124,26 @@ export async function walkDefinitions(
 		const members = groups.get(path)
 		if (!members) return
 		const children = node.children ? Object.values(node.children) : []
-		for (const { leaf, def } of members) {
-			const child = children.find((c) => 'identifier' in c.contents && c.contents.identifier === leaf)
+		for (const member of members) {
+			const child = children.find((c) => 'identifier' in c.contents && c.contents.identifier === member.leaf)
 			if (child?.contents.type !== Model.ElementType.Parameter) {
-				cb.onAbsent(def)
+				cb.onAbsent(member)
 				continue
 			}
-			cb.onParameter(def, child as Model.NumberedTreeNode<Model.Parameter>)
+			cb.onParameter(member, child as Model.NumberedTreeNode<Model.Parameter>)
 		}
 	}
+
+	const listDirectory = async (node: Model.NumberedTreeNode<Model.EmberElement>, mask?: DirFieldMask): Promise<void> =>
+		withDeadline(
+			(async () => {
+				await (
+					await client.getDirectory(node, mask)
+				).response
+			})(),
+			opts.requestDeadlineMs,
+			'getDirectory',
+		)
 
 	// The unit answers a full getDirectory on each child; only the combined listing overflows a
 	// frame. Failures here leave the identifier and value from the masked parent.
@@ -140,9 +158,7 @@ export async function walkDefinitions(
 			stats.requested++
 			stats.filled++
 			try {
-				await (
-					await client.getDirectory(child)
-				).response
+				await listDirectory(child)
 			} catch (error) {
 				cb.log(
 					'debug',
@@ -153,10 +169,23 @@ export async function walkDefinitions(
 	}
 
 	const runTask = async ({ path, attempt }: WalkTask): Promise<void> => {
+		const retry = (): boolean => {
+			if (attempt >= opts.maxAttempts || cb.isCancelled()) return false
+			stats.retried++
+			queue.push({ path, attempt: attempt + 1 })
+			return true
+		}
+
 		let node: Model.TreeElement<Model.EmberElement> | undefined
 		try {
-			node = await client.getElementByPath(path, undefined, PATH_DELIMITER)
-		} catch {
+			node = await withDeadline(
+				client.getElementByPath(path, undefined, PATH_DELIMITER),
+				opts.requestDeadlineMs,
+				'getElementByPath',
+			)
+		} catch (error) {
+			// Any other failure means the path isn't on this unit.
+			if (error instanceof DeadlineError && retry()) return
 			node = undefined
 		}
 
@@ -174,16 +203,10 @@ export async function walkDefinitions(
 			stats.requested++
 			if (mask !== undefined) stats.masked++
 			try {
-				await (
-					await client.getDirectory(numbered, mask)
-				).response
+				await listDirectory(numbered, mask)
 			} catch (error) {
 				const message = errorMessage(error)
-				if (attempt < opts.maxAttempts && !cb.isCancelled()) {
-					stats.retried++
-					queue.push({ path, attempt: attempt + 1 })
-					return
-				}
+				if (retry()) return
 				stats.failed++
 				cb.log('debug', `Directory "${path}" not loaded after ${attempt} attempt(s): ${message}`)
 				prune(path)
@@ -208,12 +231,22 @@ export async function walkDefinitions(
 		}
 	}
 
+	// Idle workers park here until a task finishes. Every enqueue happens inside a task, so a finish
+	// is the only moment new work (or the end of the walk) can appear.
+	let idle: Array<() => void> = []
+	const waitForTaskEnd = async (): Promise<void> => new Promise((resolve) => idle.push(resolve))
+	const wakeIdle = (): void => {
+		const waiting = idle
+		idle = []
+		for (const resolve of waiting) resolve()
+	}
+
 	const worker = async (): Promise<void> => {
 		// Drain on "queue empty AND nothing in flight" — an in-flight task can still enqueue children.
 		while (queue.length > 0 || inFlight > 0) {
 			const task = queue.shift()
 			if (!task) {
-				await new Promise((resolve) => setImmediate(resolve))
+				await waitForTaskEnd()
 				continue
 			}
 			if (cb.isCancelled()) return
@@ -224,6 +257,7 @@ export async function walkDefinitions(
 				await runTask(task)
 			} finally {
 				inFlight--
+				wakeIdle()
 			}
 		}
 	}
