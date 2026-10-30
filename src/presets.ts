@@ -413,10 +413,14 @@ function addString(self: ModuleInstance, presets: CompanionPresetDefinitions, lo
  */
 export function UpdatePresets(self: ModuleInstance): void {
 	const presets: CompanionPresetDefinitions = {}
+	const actionControls = new Map(self.actionControls.map((logical) => [logical.key, logical]))
 
-	for (const logical of self.logicalControls) {
-		if (logical.category === CATEGORY.METADATA_LABELING) continue
-		const interactive = isWritable(logical.spec)
+	for (const listed of self.logicalControls) {
+		if (listed.category === CATEGORY.METADATA_LABELING) continue
+		const interactive = isWritable(listed.spec)
+		// Writable controls take their action's instances, so no preset targets one the unit locks.
+		const logical = interactive ? actionControls.get(listed.key) : listed
+		if (!logical) continue
 
 		switch (logical.spec.kind) {
 			case 'boolean':

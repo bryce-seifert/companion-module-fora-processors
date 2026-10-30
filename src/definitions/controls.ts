@@ -82,6 +82,13 @@ export function parseEnumeration(enumeration: string): EnumChoice[] {
 		.filter((choice) => choice.label !== '' && choice.label !== '~')
 }
 
+// The choices the unit offers for one instance, keeping the table's own entry (label, flags) for
+// every id it knows; only ids the table lacks take the device's label.
+export function withDeviceChoices(spec: EnumSpec, device: readonly EnumChoice[]): EnumSpec {
+	const known = new Map(spec.choices.map((choice) => [choice.id, choice]))
+	return { ...spec, choices: device.map((choice) => known.get(choice.id) ?? choice) }
+}
+
 // Same enum, device-supplied labels. Ids the device didn't name keep the table's own label, so a
 // partial read degrades to static text rather than blanking choices out of the dropdowns.
 export function relabelChoices(spec: EnumSpec, labels: ReadonlyMap<number, string>): EnumSpec {

@@ -5,12 +5,11 @@ import { isReadable, isWritable, parseEnumeration, type ControlSpec, type EnumCh
 import type { ModuleInstance } from './main.js'
 import { describeIdentitySource, getModelSpec, isTruncatedDirectory, type ModelSpec } from './models.js'
 import {
-	controlKey,
 	formatValue,
 	groupByParent,
-	NO_DEVICE_CHOICES,
+	NO_DEVICE_FIT,
 	PATH_DELIMITER,
-	type DeviceChoices,
+	type DeviceFit,
 	type VariableDefinition,
 } from './state.js'
 import { errorMessage, withDeadline } from './util.js'
@@ -52,6 +51,12 @@ type WalkTarget =
 function instanceChoices({ enumeration }: Model.Parameter): EnumChoice[] | undefined {
 	const choices = enumeration === undefined ? [] : parseEnumeration(enumeration)
 	return choices.length > 0 ? choices : undefined
+}
+
+// Writable in the tables, but the unit can lock one in its current mode or option fit (FA-9600
+// SQD / 2SI Division on FS2). A field-masked listing omits access, so only an explicit lock counts.
+function isLocked(def: VariableDefinition, { access }: Model.Parameter): boolean {
+	return isWritable(def.control) && (access === Model.ParameterAccess.Read || access === Model.ParameterAccess.None)
 }
 
 // Run `worker` over `items` with at most `limit` promises in flight at a time.
@@ -168,8 +173,8 @@ export class ForaApi {
 	#retrying = false
 	// Parameters this unit actually carries, resolved on the current connection.
 	readonly #live = new Map<string, LiveParameter>()
-	// What the current connection has read of the unit's enum choices, kept to re-apply on change.
-	#deviceChoices: DeviceChoices = NO_DEVICE_CHOICES
+	// What the current connection has read of the unit's fit, kept to re-apply on change.
+	#deviceFit: DeviceFit = NO_DEVICE_FIT
 
 	constructor(self: ModuleInstance) {
 		this.#self = self
@@ -264,8 +269,9 @@ export class ForaApi {
 
 		const absentByKey = new Map<string, { count: number; sample: string }>()
 		const { groups, choiceLabels } = buildWalkTargets(this.#self.definitions, spec)
-		const enumerated = new Set(spec.deviceEnumeratedControls)
 		const perInstance = new Map<string, readonly EnumChoice[]>()
+		const absent = new Set<string>()
+		const readOnly = new Set<string>()
 		let labelsRead = 0
 
 		const stats = await walkTree(
@@ -289,16 +295,17 @@ export class ForaApi {
 						return
 					}
 					const { def } = target
-					const choices = enumerated.has(controlKey(def)) ? instanceChoices(node.contents) : undefined
+					const choices = def.control.kind === 'enum' ? instanceChoices(node.contents) : undefined
 					if (choices) perInstance.set(def.id, choices)
+					if (isLocked(def, node.contents)) readOnly.add(def.id)
 					this.#self.state.set(def.id, formatValue(def.control, value))
 					this.#live.set(def.id, { def, node, latestRaw: value, writeCount: 0 })
 				},
-				// Expected: subtrees are config-dependent and option blocks may be unfitted. The
-				// action stays in the UI either way; setting one that isn't there just warns.
+				// Expected: subtrees are config-dependent and option blocks may be unfitted.
 				onAbsent: (target) => {
 					if (target.kind === 'label') return
 					const { def } = target
+					absent.add(def.id)
 					const key = def.group?.key ?? def.id
 					const tally = absentByKey.get(key) ?? { count: 0, sample: def.path }
 					tally.count++
@@ -311,8 +318,15 @@ export class ForaApi {
 
 		if (this.#client !== client) return
 
-		this.#deviceChoices = { labels: choiceLabels, perInstance }
-		if (choiceLabels.size > 0 || perInstance.size > 0) this.#applyDeviceChoices()
+		// A directory that failed to load is reported absent too; hiding on that would drop actions
+		// until the next reconnect, so only a walk that loaded everything hides what's missing.
+		this.#deviceFit = {
+			labels: choiceLabels,
+			perInstance,
+			absent: stats.failed === 0 ? absent : new Set(),
+			readOnly,
+		}
+		this.#applyDeviceFit()
 
 		let absentTotal = 0
 		for (const [key, { count, sample }] of [...absentByKey].sort((a, b) => b[1].count - a[1].count)) {
@@ -335,24 +349,28 @@ export class ForaApi {
 		await this.#subscribeAll(client)
 	}
 
-	#applyDeviceChoices(): void {
-		this.#self.applyDeviceChoices(this.#deviceChoices)
+	#applyDeviceFit(): void {
+		this.#self.applyDeviceFit(this.#deviceFit)
 		this.#rebindDefinitions()
 	}
 
-	// Switching the unit's mode (Dual HD, 4K/HD) changes which choices those parameters offer.
-	#updateInstanceChoices(live: LiveParameter, updated: Model.Parameter): void {
-		const spec = getModelSpec(this.#self.config.model)
-		if (!spec.deviceEnumeratedControls.includes(controlKey(live.def))) return
-		const choices = instanceChoices(updated)
-		if (!choices) return
-		const current = this.#deviceChoices.perInstance.get(live.def.id)
-		if (JSON.stringify(current) === JSON.stringify(choices)) return
+	// Switching the unit's mode (Dual HD, 4K/HD) changes which choices a parameter offers and
+	// whether it is writable. Value-only updates carry neither, so they change nothing here.
+	#updateDeviceFit(live: LiveParameter, updated: Model.Parameter): void {
+		const { id } = live.def
+		const fit = this.#deviceFit
+		const choices = live.def.control.kind === 'enum' ? instanceChoices(updated) : undefined
+		const choicesChanged = choices !== undefined && JSON.stringify(fit.perInstance.get(id)) !== JSON.stringify(choices)
+		const locked = updated.access === undefined ? fit.readOnly.has(id) : isLocked(live.def, updated)
+		if (!choicesChanged && locked === fit.readOnly.has(id)) return
 
-		const perInstance = new Map(this.#deviceChoices.perInstance)
-		perInstance.set(live.def.id, choices)
-		this.#deviceChoices = { ...this.#deviceChoices, perInstance }
-		this.#applyDeviceChoices()
+		const perInstance = new Map(fit.perInstance)
+		if (choices) perInstance.set(id, choices)
+		const readOnly = new Set(fit.readOnly)
+		if (locked) readOnly.add(id)
+		else readOnly.delete(id)
+		this.#deviceFit = { ...fit, perInstance, readOnly }
+		this.#applyDeviceFit()
 	}
 
 	// Relabelling replaces the definitions the walk resolved against; point what's already live at
@@ -373,7 +391,7 @@ export class ForaApi {
 				await client.subscribe(subscribeTarget(live.node), (updated) => {
 					if (this.#client !== client) return // stale update from a superseded client
 					if (updated.contents.type !== Model.ElementType.Parameter) return
-					this.#updateInstanceChoices(live, updated.contents)
+					this.#updateDeviceFit(live, updated.contents)
 					live.latestRaw = updated.contents.value
 					this.#self.state.set(live.def.id, formatValue(live.def.control, updated.contents.value))
 				})
@@ -434,10 +452,7 @@ export class ForaApi {
 			this.#self.log('warn', `Cannot set "${id}": not a writable ${kind}`)
 			return undefined
 		}
-		// Writable in the tables, but the unit can lock one in its current mode or option fit (FA-9600
-		// SQD / 2SI Division on FS2). A field-masked listing omits access, so only an explicit lock counts.
-		const { access } = live.node.contents
-		if (access === Model.ParameterAccess.Read || access === Model.ParameterAccess.None) {
+		if (isLocked(live.def, live.node.contents)) {
 			this.#self.log('warn', `Cannot set ${live.def.name}: the unit reports it read-only in its current mode`)
 			return undefined
 		}

@@ -1,7 +1,7 @@
 import type { CompanionVariableValue, CompanionVariableValues } from '@companion-module/base'
 import { buildFa1616Definitions } from './definitions/fa1616.js'
 import { buildFa9600Definitions } from './definitions/fa9600.js'
-import { relabelChoices, type ControlSpec, type EnumChoice, type EnumSpec } from './definitions/controls.js'
+import { relabelChoices, withDeviceChoices, type EnumChoice, type EnumSpec } from './definitions/controls.js'
 import { controlKey as controlKeyOf, type VariableDefinition, type VariableId } from './definitions/shared.js'
 import type { ModuleInstance } from './main.js'
 import type { ModelId } from './models.js'
@@ -23,45 +23,53 @@ export {
 /** Enum labels read from the device, keyed by control key then by the enum's own id. */
 export type ChoiceLabels = ReadonlyMap<string, ReadonlyMap<number, string>>
 
-/** Enum choices read off the device: relabelled slots per control, and whole choice lists per instance. */
-export interface DeviceChoices {
+/**
+ * What the connected unit reports about its own fit (mode, cards, licences): its enum labels and
+ * choices, and which parameters it lacks or locks. Empty until the first walk lands.
+ */
+export interface DeviceFit {
 	readonly labels: ChoiceLabels
 	/** Variable id -> the choices that instance's own Ember+ enumeration offers. */
 	readonly perInstance: ReadonlyMap<VariableId, readonly EnumChoice[]>
+	/** Parameters this unit doesn't carry (an unfitted card or licence). */
+	readonly absent: ReadonlySet<VariableId>
+	/** Parameters writable in the tables that the unit reports read-only in its current mode. */
+	readonly readOnly: ReadonlySet<VariableId>
 }
 
-export const NO_DEVICE_CHOICES: DeviceChoices = { labels: new Map(), perInstance: new Map() }
+export const NO_DEVICE_FIT: DeviceFit = {
+	labels: new Map(),
+	perInstance: new Map(),
+	absent: new Set(),
+	readOnly: new Set(),
+}
 
-export function buildDefinitions(model: ModelId | undefined, choices: DeviceChoices): VariableDefinition[] {
+export function buildDefinitions(model: ModelId | undefined, fit: DeviceFit): VariableDefinition[] {
 	const definitions = model === '1616' ? buildFa1616Definitions() : buildFa9600Definitions()
-	if (choices.labels.size === 0 && choices.perInstance.size === 0) return definitions
+	if (fit.labels.size === 0 && fit.perInstance.size === 0) return definitions
 
 	// Instances of a parameter share one spec object; keep that so the relabelled spec is built once.
-	const relabelled = new Map<ControlSpec, ControlSpec>()
+	const relabelled = new Map<EnumSpec, EnumSpec>()
 	// Instances offering the same list share a spec too, so they share one value field in the UI.
 	const enumerated = new Map<string, EnumSpec>()
 	return definitions.map((def) => {
 		if (def.control.kind !== 'enum') return def
 
-		const instanceChoices = choices.perInstance.get(def.id)
-		if (instanceChoices) {
-			const signature = `${controlKeyOf(def)}:${JSON.stringify(instanceChoices)}`
-			let spec = enumerated.get(signature)
-			if (!spec) {
-				spec = { ...def.control, choices: instanceChoices }
-				enumerated.set(signature, spec)
-			}
-			return { ...def, control: spec }
+		const labels = fit.labels.get(controlKeyOf(def))
+		let spec = def.control
+		if (labels) {
+			const base = spec
+			spec = relabelled.get(base) ?? relabelChoices(base, labels)
+			relabelled.set(base, spec)
 		}
 
-		const labels = choices.labels.get(controlKeyOf(def))
-		if (!labels) return def
-		let spec = relabelled.get(def.control)
-		if (!spec) {
-			spec = relabelChoices(def.control, labels)
-			relabelled.set(def.control, spec)
+		const instanceChoices = fit.perInstance.get(def.id)
+		if (instanceChoices) {
+			const signature = `${controlKeyOf(def)}:${JSON.stringify(instanceChoices)}`
+			spec = enumerated.get(signature) ?? withDeviceChoices(spec, instanceChoices)
+			enumerated.set(signature, spec)
 		}
-		return { ...def, control: spec }
+		return spec === def.control ? def : { ...def, control: spec }
 	})
 }
 

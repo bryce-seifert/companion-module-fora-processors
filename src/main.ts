@@ -5,12 +5,13 @@ import { GetConfigFields, type ModuleConfig } from './config.js'
 import { UpdateFeedbacks } from './feedbacks.js'
 import { buildLogicalControls, type LogicalControl } from './logical-controls.js'
 import { UpdatePresets } from './presets.js'
+import { getModelSpec } from './models.js'
 import {
 	buildDefinitions,
 	DeviceStateStore,
-	NO_DEVICE_CHOICES,
+	NO_DEVICE_FIT,
 	type ChoiceLabels,
-	type DeviceChoices,
+	type DeviceFit,
 	type VariableDefinition,
 } from './state.js'
 import { UpgradeScripts } from './upgrades.js'
@@ -23,9 +24,12 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	state!: DeviceStateStore
 	// The selected model's fixed parameter table
 	definitions: readonly VariableDefinition[] = []
+	// Every control this unit carries; drives feedbacks and presets.
 	logicalControls: readonly LogicalControl[] = []
-	// Enum choices read off the device on the current connection; empty until the first read lands.
-	#deviceChoices: DeviceChoices = NO_DEVICE_CHOICES
+	// The same, less what the unit reports read-only; drives actions.
+	actionControls: readonly LogicalControl[] = []
+	// What the unit reported about its fit on the current connection; empty until the first walk lands.
+	#deviceFit: DeviceFit = NO_DEVICE_FIT
 
 	constructor(internal: unknown) {
 		super(internal)
@@ -49,22 +53,30 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	async configUpdated(config: ModuleConfig): Promise<void> {
 		this.config = config
 		// A different unit (or model) names its slots differently; the next connection reads them.
-		this.#deviceChoices = NO_DEVICE_CHOICES
+		this.#deviceFit = NO_DEVICE_FIT
 		this.#rebuildForModel()
 		this.#startConnection()
 	}
 
-	// Rebuilding replaces every action, feedback and preset, so it only runs when the choices differ
-	// from what the UI already shows — a reconnect to the same unit reads the same strings back.
-	applyDeviceChoices(choices: DeviceChoices): void {
-		if (deviceChoicesEqual(this.#deviceChoices, choices)) return
-		this.#deviceChoices = choices
+	// Rebuilding replaces every action, feedback and preset, so it only runs when the fit differs
+	// from what the UI already shows — a reconnect to the same unit reads the same back.
+	applyDeviceFit(fit: DeviceFit): void {
+		if (deviceFitEqual(this.#deviceFit, fit)) return
+		this.#deviceFit = fit
 		this.#rebuildForModel()
 	}
 
 	#rebuildForModel(): void {
-		this.definitions = buildDefinitions(this.config.model, this.#deviceChoices)
-		this.logicalControls = buildLogicalControls(this.definitions)
+		const { absent, readOnly } = this.#deviceFit
+		const perInstanceValueKeys = new Set(getModelSpec(this.config.model).perInstanceValueControls)
+		this.definitions = buildDefinitions(this.config.model, this.#deviceFit)
+		// Variables keep every definition, so their names stay stable whatever the unit carries.
+		const present = this.definitions.filter((def) => !absent.has(def.id))
+		this.logicalControls = buildLogicalControls(present, perInstanceValueKeys)
+		this.actionControls = buildLogicalControls(
+			present.filter((def) => !readOnly.has(def.id)),
+			perInstanceValueKeys,
+		)
 		UpdateVariableDefinitions(this)
 		UpdateActions(this)
 		UpdateFeedbacks(this)
@@ -82,12 +94,17 @@ export class ModuleInstance extends InstanceBase<ModuleConfig> {
 	}
 }
 
-function deviceChoicesEqual(a: DeviceChoices, b: DeviceChoices): boolean {
+function deviceFitEqual(a: DeviceFit, b: DeviceFit): boolean {
 	if (!choiceLabelsEqual(a.labels, b.labels) || a.perInstance.size !== b.perInstance.size) return false
+	if (!setsEqual(a.absent, b.absent) || !setsEqual(a.readOnly, b.readOnly)) return false
 	for (const [id, choices] of a.perInstance) {
 		if (JSON.stringify(choices) !== JSON.stringify(b.perInstance.get(id))) return false
 	}
 	return true
+}
+
+function setsEqual<T>(a: ReadonlySet<T>, b: ReadonlySet<T>): boolean {
+	return a.size === b.size && [...a].every((value) => b.has(value))
 }
 
 function choiceLabelsEqual(a: ChoiceLabels, b: ChoiceLabels): boolean {

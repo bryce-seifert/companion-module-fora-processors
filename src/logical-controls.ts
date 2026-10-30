@@ -37,7 +37,8 @@ export type SelectorCombo = readonly SelectorComboEntry[]
 /**
  * The value field for one spec of a control. Nearly every control has a single spec shared by all
  * its instances; where instances differ (fa1616 `input_select`, per PRU block) each spec gets its
- * own field, shown only for the selections that use it.
+ * own field, shown only for the selections that use it. Controls whose choices follow the unit's
+ * mode get a field per instance instead, so a mode switch can't move a saved choice to another field.
  */
 export interface SpecVariant {
 	readonly fieldId: string
@@ -75,14 +76,21 @@ interface LogicalControlAccumulator {
 	// Selector combos (one value per dim) using each distinct spec, in encounter order.
 	specCombos: Map<ControlSpec, string[][]>
 	specById: Map<string, ControlSpec>
+	comboById: Map<string, string[]>
 }
 
 /** A control key is unique across the model, so one id per layer is enough. */
 export const actionId = (logical: LogicalControl): string => `act_${logical.key}`
 export const feedbackId = (logical: LogicalControl): string => `fb_${logical.key}`
 
-/** Collapse the definition table into its logical controls, sorted by category + name. */
-export function buildLogicalControls(definitions: readonly VariableDefinition[]): LogicalControl[] {
+/**
+ * Collapse the definition table into its logical controls, sorted by category + name.
+ * `perInstanceValueKeys` are the control keys that get a value field per instance.
+ */
+export function buildLogicalControls(
+	definitions: readonly VariableDefinition[],
+	perInstanceValueKeys: ReadonlySet<string>,
+): LogicalControl[] {
 	const accumulators = new Map<string, LogicalControlAccumulator>()
 
 	for (const def of definitions) {
@@ -99,6 +107,7 @@ export function buildLogicalControls(definitions: readonly VariableDefinition[])
 				variantById: new Map(),
 				specCombos: new Map(),
 				specById: new Map(),
+				comboById: new Map(),
 			}
 			accumulators.set(key, acc)
 		}
@@ -115,6 +124,7 @@ export function buildLogicalControls(definitions: readonly VariableDefinition[])
 		combos.push(values)
 		acc.specCombos.set(def.control, combos)
 		acc.specById.set(def.id, def.control)
+		acc.comboById.set(def.id, values)
 	}
 
 	const logicals: LogicalControl[] = [...accumulators.values()].map((acc) => ({
@@ -124,7 +134,9 @@ export function buildLogicalControls(definitions: readonly VariableDefinition[])
 		category: acc.category,
 		spec: acc.spec,
 		variantById: acc.variantById,
-		...buildSpecVariants(acc),
+		...(perInstanceValueKeys.has(acc.key) && acc.dims.length > 0
+			? perInstanceSpecVariants(acc)
+			: buildSpecVariants(acc)),
 		selectors: acc.dims.map((dim) => ({
 			dim,
 			label: DIMENSION_LABELS[dim] ?? dim,
@@ -147,6 +159,20 @@ function buildSpecVariants(acc: LogicalControlAccumulator): Pick<LogicalControl,
 			specs.length === 1 ? undefined : visibleExpression(acc.dims, acc.specCombos.get(spec) ?? [], acc.dimChoices),
 	}))
 	const specVariantById = new Map([...acc.specById].map(([id, spec]) => [id, specs.indexOf(spec)]))
+	return { specVariants, specVariantById }
+}
+
+// One field per instance, named for its selector values (`value_fs2`).
+function perInstanceSpecVariants(
+	acc: LogicalControlAccumulator,
+): Pick<LogicalControl, 'specVariants' | 'specVariantById'> {
+	const instances = [...acc.comboById]
+	const specVariants = instances.map(([id, combo]) => ({
+		fieldId: `value_${combo.join('_')}`,
+		spec: acc.specById.get(id) ?? acc.spec,
+		isVisibleExpression: combo.map((value, index) => `$(options:${acc.dims[index]}) == '${value}'`).join(' && '),
+	}))
+	const specVariantById = new Map(instances.map(([id], index) => [id, index]))
 	return { specVariants, specVariantById }
 }
 
@@ -181,7 +207,7 @@ export function specVariantFor(logical: LogicalControl, id: string): SpecVariant
 
 /**
  * The raw value option for the variable `id`. Falls back to `value`, where a control's only value
- * field lived before its instances were split by spec.
+ * field lived before its instances were split by spec or by instance.
  */
 export function valueOption(logical: LogicalControl, id: string, options: CompanionOptionValues): unknown {
 	return options[specVariantFor(logical, id).fieldId] ?? options.value

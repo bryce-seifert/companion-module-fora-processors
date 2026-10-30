@@ -101,7 +101,7 @@ function stringAction(self: ModuleInstance, logical: LogicalControl): CompanionA
 export function UpdateActions(self: ModuleInstance): void {
 	const actions: CompanionActionDefinitions = {}
 
-	for (const logical of self.logicalControls) {
+	for (const logical of self.actionControls) {
 		const { spec } = logical
 		if (!isWritable(spec)) continue
 
