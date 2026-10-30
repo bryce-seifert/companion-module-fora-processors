@@ -197,13 +197,28 @@ export function selectorFields(logical: LogicalControl): CompanionInputFieldDrop
 	}))
 }
 
-/** Resolve the concrete variable id targeted by a fired action/feedback from its selector values. */
-export function resolveId(logical: LogicalControl, options: CompanionOptionValues): string {
+/**
+ * Resolve the concrete variable id targeted by a fired action/feedback from its selector values.
+ * The dropdowns are independent, so they can name a pair that doesn't exist (Grp 1 + Ch 20, when
+ * Grp 1 is Ch 01–16); that resolves to `undefined` rather than to some other instance.
+ */
+export function resolveId(logical: LogicalControl, options: CompanionOptionValues): string | undefined {
 	const combo = logical.selectors.map((selector) => String(options[selector.dim])).join('|')
-	return logical.variantById.get(combo) ?? [...logical.variantById.values()][0]
+	return logical.variantById.get(combo)
 }
 
-/** The first choice of every selector dimension — the same combo `resolveId` falls back to. */
+/** The selector values in `options` as their dropdown labels, e.g. "PRU A1, Group Grp 1, Channel Ch 20". */
+export function describeSelection(logical: LogicalControl, options: CompanionOptionValues): string {
+	return logical.selectors
+		.map((selector) => {
+			const value = String(options[selector.dim])
+			const choice = selector.choices.find((c) => c.id === value)
+			return `${selector.label} ${choice?.label ?? value}`
+		})
+		.join(', ')
+}
+
+/** The first choice of every selector dimension. */
 export function defaultOptions(logical: LogicalControl): CompanionOptionValues {
 	return Object.fromEntries(logical.selectors.map((selector) => [selector.dim, selector.choices[0]?.id]))
 }

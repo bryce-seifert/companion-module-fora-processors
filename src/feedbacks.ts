@@ -41,12 +41,21 @@ type BooleanFeedbackBase = Omit<CompanionBooleanFeedbackDefinition, 'options' | 
 function trackSubscription(self: ModuleInstance, logical: LogicalControl) {
 	return {
 		subscribe: (feedback: CompanionFeedbackInfo) => {
-			self.state.trackFeedback(feedback.id, resolveId(logical, feedback.options))
+			retarget(self, logical, feedback)
 		},
 		unsubscribe: (feedback: CompanionFeedbackInfo) => {
 			self.state.untrackFeedback(feedback.id)
 		},
 	}
+}
+
+// Points the feedback at the id its selectors resolve to. One whose selectors name no parameter
+// watches nothing and reads as inactive.
+function retarget(self: ModuleInstance, logical: LogicalControl, feedback: CompanionFeedbackInfo): string | undefined {
+	const id = resolveId(logical, feedback.options)
+	if (id === undefined) self.state.untrackFeedback(feedback.id)
+	else self.state.trackFeedback(feedback.id, id)
+	return id
 }
 
 // The value a placed feedback reads, re-pointing it at that id as a side effect: Companion runs
@@ -56,9 +65,8 @@ function readTracked(
 	logical: LogicalControl,
 	feedback: CompanionFeedbackInfo,
 ): CompanionVariableValue | undefined {
-	const id = resolveId(logical, feedback.options)
-	self.state.trackFeedback(feedback.id, id)
-	return self.state.get(id)
+	const id = retarget(self, logical, feedback)
+	return id === undefined ? undefined : self.state.get(id)
 }
 
 function commonFeedback(self: ModuleInstance, logical: LogicalControl): BooleanFeedbackBase {
@@ -85,11 +93,12 @@ function enumFeedback(self: ModuleInstance, logical: LogicalControl): CompanionB
 		options: [...selectorFields(logical), ...enumValueFields(logical)],
 		// State holds the enum's label, not its index.
 		callback: (feedback) => {
-			const id = resolveId(logical, feedback.options)
+			const id = retarget(self, logical, feedback)
+			if (id === undefined) return false
 			const { spec } = specVariantFor(logical, id)
 			const value = Number(valueOption(logical, id, feedback.options))
 			const choice = spec.kind === 'enum' ? spec.choices.find((c) => c.id === value) : undefined
-			return choice !== undefined && readTracked(self, logical, feedback) === choice.label
+			return choice !== undefined && self.state.get(id) === choice.label
 		},
 	}
 }

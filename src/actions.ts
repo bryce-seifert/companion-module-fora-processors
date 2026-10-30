@@ -1,6 +1,17 @@
-import type { CompanionActionDefinition, CompanionActionDefinitions } from '@companion-module/base'
+import type {
+	CompanionActionDefinition,
+	CompanionActionDefinitions,
+	CompanionOptionValues,
+} from '@companion-module/base'
 import { isWritable } from './definitions/controls.js'
-import { actionId, resolveId, selectorFields, valueOption, type LogicalControl } from './logical-controls.js'
+import {
+	actionId,
+	describeSelection,
+	resolveId,
+	selectorFields,
+	valueOption,
+	type LogicalControl,
+} from './logical-controls.js'
 import type { ModuleInstance } from './main.js'
 import {
 	BOOLEAN_ACTION_MODES,
@@ -12,6 +23,15 @@ import {
 	numberValueField,
 } from './option-fields.js'
 
+// The target of a fired action, or undefined (with a warning) when its selectors name no parameter.
+function targetId(self: ModuleInstance, logical: LogicalControl, options: CompanionOptionValues): string | undefined {
+	const id = resolveId(logical, options)
+	if (id === undefined) {
+		self.log('warn', `${logical.displayName}: no such parameter (${describeSelection(logical, options)}); not sent`)
+	}
+	return id
+}
+
 function numberAction(self: ModuleInstance, logical: LogicalControl): CompanionActionDefinition {
 	const unit = logical.spec.kind === 'number' && logical.spec.unit ? ` (${logical.spec.unit})` : ''
 	return {
@@ -22,7 +42,8 @@ function numberAction(self: ModuleInstance, logical: LogicalControl): CompanionA
 			numberValueField(`Value${unit}`),
 		],
 		callback: async (event) => {
-			const id = resolveId(logical, event.options)
+			const id = targetId(self, logical, event.options)
+			if (id === undefined) return
 			const value = Number(event.options.value)
 			const mode = isNumberActionMode(event.options.mode) ? event.options.mode : 'set'
 
@@ -44,8 +65,10 @@ function booleanAction(self: ModuleInstance, logical: LogicalControl): Companion
 		name: logical.displayName,
 		options: [...selectorFields(logical), dropdownField('mode', 'Action', BOOLEAN_ACTION_MODES, 'toggle')],
 		callback: async (event) => {
+			const id = targetId(self, logical, event.options)
+			if (id === undefined) return
 			const mode = isBooleanActionMode(event.options.mode) ? event.options.mode : 'toggle'
-			await self.api.setBoolean(resolveId(logical, event.options), mode)
+			await self.api.setBoolean(id, mode)
 		},
 	}
 }
@@ -55,7 +78,8 @@ function enumAction(self: ModuleInstance, logical: LogicalControl): CompanionAct
 		name: logical.displayName,
 		options: [...selectorFields(logical), ...enumValueFields(logical)],
 		callback: async (event) => {
-			const id = resolveId(logical, event.options)
+			const id = targetId(self, logical, event.options)
+			if (id === undefined) return
 			await self.api.setEnum(id, Number(valueOption(logical, id, event.options)))
 		},
 	}
@@ -66,7 +90,9 @@ function stringAction(self: ModuleInstance, logical: LogicalControl): CompanionA
 		name: logical.displayName,
 		options: [...selectorFields(logical), { type: 'textinput', id: 'value', label: logical.name, default: '' }],
 		callback: async (event) => {
-			await self.api.setString(resolveId(logical, event.options), String(event.options.value ?? ''))
+			const id = targetId(self, logical, event.options)
+			if (id === undefined) return
+			await self.api.setString(id, String(event.options.value ?? ''))
 		},
 	}
 }

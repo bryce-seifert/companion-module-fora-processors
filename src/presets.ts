@@ -72,6 +72,13 @@ const PRESET_CATEGORY_DIMS = new Set(['fs'])
  */
 const PRESET_EXPAND_DIMS = new Set(['color', 'comp'])
 
+// Presets are built from real choices, so an unresolved selection is a bug in the tables.
+function presetTarget(logical: LogicalControl, options: CompanionOptionValues): string {
+	const id = resolveId(logical, options)
+	if (id === undefined) throw new Error(`No parameter for preset of "${logical.key}" (${JSON.stringify(options)})`)
+	return id
+}
+
 const buttonStyle = (text: string, interactive: boolean) => ({
 	text,
 	size: 12 as const,
@@ -158,7 +165,7 @@ function addPerInstanceBoolean(
 		const options = optionsFromCombo(combo)
 		const context = selectorContext(combo)
 		const key = `${logical.key}_${combo.map((entry) => entry.id).join('_')}`
-		const valueRef = `$(${self.label}:${resolveId(logical, options)})`
+		const valueRef = `$(${self.label}:${presetTarget(logical, options)})`
 		presets[key] = {
 			type: 'button',
 			category,
@@ -178,7 +185,7 @@ function addBoolean(
 ): void {
 	for (const slice of categorySlices(logical)) {
 		const key = `${logical.key}${slice.keySuffix}`
-		const valueRef = `$(${self.label}:${resolveId(logical, slice.options)})`
+		const valueRef = `$(${self.label}:${presetTarget(logical, slice.options)})`
 		addDivider(presets, key, slice.category, logical.name)
 		presets[key] = {
 			type: 'button',
@@ -245,7 +252,7 @@ function addPathRoutingEnum(
 
 			addDivider(presets, comboKey, category, headerContext || `${logical.name} ${categoryContext}`)
 
-			const variant = specVariantFor(logical, resolveId(logical, comboOptions))
+			const variant = specVariantFor(logical, presetTarget(logical, comboOptions))
 			const comboChoices = variant.spec.kind === 'enum' ? variant.spec.choices : choices
 			for (const choice of comboChoices) {
 				addEnumChoiceButton(presets, logical, interactive, showsFeedback, {
@@ -346,7 +353,7 @@ function addNumberPreset(
 	variantLabel: string,
 	category: string,
 ): void {
-	const valueRef = `$(${self.label}:${resolveId(logical, options)})`
+	const valueRef = `$(${self.label}:${presetTarget(logical, options)})`
 	const unit = logical.spec.kind === 'number' && logical.spec.unit ? ` ${logical.spec.unit}` : ''
 
 	const nudge = (suffix: string, mode: 'increase' | 'decrease', text: string): void => {
@@ -384,7 +391,7 @@ function addString(self: ModuleInstance, presets: CompanionPresetDefinitions, lo
 
 	for (const slice of categorySlices(logical)) {
 		const key = `${logical.key}${slice.keySuffix}`
-		const valueRef = `$(${self.label}:${resolveId(logical, slice.options)})`
+		const valueRef = `$(${self.label}:${presetTarget(logical, slice.options)})`
 		addDivider(presets, key, slice.category, logical.name)
 		presets[`${key}_status`] = {
 			type: 'button',
