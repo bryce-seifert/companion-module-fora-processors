@@ -330,7 +330,8 @@ function audioDefinitions(): DefinitionDraft[] {
 			group: { key: 'aud_fade', name: 'Audio Fade In/Out', selectors: [pruSelector(n)] },
 		})
 		for (const g of range(1, 4)) {
-			// Channels are numbered 01–64 continuously, 16 per group.
+			// Channels are numbered 01–64 continuously, 16 per group. The channel alone picks the group,
+			// so gain/delay offer no Group selector that could name a channel outside it.
 			for (const ch of range((g - 1) * 16 + 1, g * 16)) {
 				const chp = pad(ch, 2)
 				defs.push({
@@ -341,7 +342,7 @@ function audioDefinitions(): DefinitionDraft[] {
 					group: {
 						key: 'aud_gain',
 						name: 'Per-Channel Gain (Embedded)',
-						selectors: [pruSelector(n), groupSel(g), chSel(ch)],
+						selectors: [pruSelector(n), chSel(ch)],
 					},
 				})
 				defs.push({
@@ -352,7 +353,7 @@ function audioDefinitions(): DefinitionDraft[] {
 					group: {
 						key: 'aud_delay',
 						name: 'Per-Channel Delay (Embedded)',
-						selectors: [pruSelector(n), groupSel(g), chSel(ch)],
+						selectors: [pruSelector(n), chSel(ch)],
 					},
 				})
 			}
