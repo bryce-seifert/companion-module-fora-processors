@@ -1,7 +1,7 @@
 import type { CompanionVariableValue, CompanionVariableValues } from '@companion-module/base'
 import { buildFa1616Definitions } from './definitions/fa1616.js'
 import { buildFa9600Definitions } from './definitions/fa9600.js'
-import { relabelChoices, type ControlSpec } from './definitions/controls.js'
+import { relabelChoices, type ControlSpec, type EnumChoice, type EnumSpec } from './definitions/controls.js'
 import { controlKey as controlKeyOf, type VariableDefinition, type VariableId } from './definitions/shared.js'
 import type { ModuleInstance } from './main.js'
 import type { ModelId } from './models.js'
@@ -23,17 +23,39 @@ export {
 /** Enum labels read from the device, keyed by control key then by the enum's own id. */
 export type ChoiceLabels = ReadonlyMap<string, ReadonlyMap<number, string>>
 
-export function buildDefinitions(model: ModelId | undefined, choiceLabels: ChoiceLabels): VariableDefinition[] {
+/** Enum choices read off the device: relabelled slots per control, and whole choice lists per instance. */
+export interface DeviceChoices {
+	readonly labels: ChoiceLabels
+	/** Variable id -> the choices that instance's own Ember+ enumeration offers. */
+	readonly perInstance: ReadonlyMap<VariableId, readonly EnumChoice[]>
+}
+
+export const NO_DEVICE_CHOICES: DeviceChoices = { labels: new Map(), perInstance: new Map() }
+
+export function buildDefinitions(model: ModelId | undefined, choices: DeviceChoices): VariableDefinition[] {
 	const definitions = model === '1616' ? buildFa1616Definitions() : buildFa9600Definitions()
-	if (choiceLabels.size === 0) return definitions
+	if (choices.labels.size === 0 && choices.perInstance.size === 0) return definitions
 
 	// Instances of a parameter share one spec object; keep that so the relabelled spec is built once.
 	const relabelled = new Map<ControlSpec, ControlSpec>()
+	// Instances offering the same list share a spec too, so they share one value field in the UI.
+	const enumerated = new Map<string, EnumSpec>()
 	return definitions.map((def) => {
-		const key = controlKeyOf(def)
-		const labels = choiceLabels.get(key)
-		if (!labels || def.control.kind !== 'enum') return def
+		if (def.control.kind !== 'enum') return def
 
+		const instanceChoices = choices.perInstance.get(def.id)
+		if (instanceChoices) {
+			const signature = `${controlKeyOf(def)}:${JSON.stringify(instanceChoices)}`
+			let spec = enumerated.get(signature)
+			if (!spec) {
+				spec = { ...def.control, choices: instanceChoices }
+				enumerated.set(signature, spec)
+			}
+			return { ...def, control: spec }
+		}
+
+		const labels = choices.labels.get(controlKeyOf(def))
+		if (!labels) return def
 		let spec = relabelled.get(def.control)
 		if (!spec) {
 			spec = relabelChoices(def.control, labels)

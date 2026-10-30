@@ -17,6 +17,9 @@ export interface ModelSpec {
 	readonly truncatedDirectories: readonly string[]
 	/** Enum labels this model publishes as strings on the device rather than fixing in firmware. */
 	readonly choiceLabelSources: readonly ChoiceLabelSource[]
+	/** Control keys whose choices differ per instance with the unit's mode and fitted options, so
+	 * each instance takes them from its own Ember+ enumeration instead of the table. */
+	readonly deviceEnumeratedControls: readonly string[]
 }
 
 // Where a set of enum controls gets its labels. LUT slots are renameable, so their names belong to
@@ -92,6 +95,7 @@ export const MODELS: Record<ModelId, ModelSpec> = {
 				fixedLabels: COLOR_PRESET_LABELS,
 			},
 		],
+		deviceEnumeratedControls: [],
 	},
 	'9600': {
 		id: '9600',
@@ -101,6 +105,10 @@ export const MODELS: Record<ModelId, ModelSpec> = {
 		deviceId: 'FA-9600',
 		truncatedDirectories: [],
 		choiceLabelSources: [],
+		// Only FS1 with FA-964K in 4K/HD or 3D-LUT mode handles UHD: it alone offers the 2160 standard,
+		// Dual/Quad input link, and Back Color / SDI Output Mute split into Link and Sep. FS2, Dual HD
+		// mode and units without FA-964K offer the HD set.
+		deviceEnumeratedControls: ['loss_mode', 'standard', 'uhd_input_link'],
 	},
 }
 

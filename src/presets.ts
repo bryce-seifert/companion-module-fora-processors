@@ -5,7 +5,7 @@ import {
 	type CompanionPresetDefinitions,
 	type CompanionPresetFeedback,
 } from '@companion-module/base'
-import { isReadable, isWritable, type EnumChoice } from './definitions/controls.js'
+import { isReadable, isWritable, type ControlSpec, type EnumChoice } from './definitions/controls.js'
 import { CATEGORY } from './definitions/shared.js'
 import {
 	actionId,
@@ -233,7 +233,7 @@ function addPathRoutingEnum(
 	logical: LogicalControl,
 	interactive: boolean,
 	showsFeedback: boolean,
-	choices: readonly EnumChoice[],
+	presetChoices: PresetChoices,
 ): void {
 	const categorySelectors = logical.selectors.filter((selector) => !PATH_ROUTING_HEADER_DIMS.has(selector.dim))
 	const headerSelectors = logical.selectors.filter((selector) => PATH_ROUTING_HEADER_DIMS.has(selector.dim))
@@ -253,8 +253,7 @@ function addPathRoutingEnum(
 			addDivider(presets, comboKey, category, headerContext || `${logical.name} ${categoryContext}`)
 
 			const variant = specVariantFor(logical, presetTarget(logical, comboOptions))
-			const comboChoices = variant.spec.kind === 'enum' ? variant.spec.choices : choices
-			for (const choice of comboChoices) {
+			for (const choice of presetChoices(variant.spec)) {
 				addEnumChoiceButton(presets, logical, interactive, showsFeedback, {
 					presetKey: `${comboKey}_${choice.id}`,
 					category,
@@ -267,20 +266,25 @@ function addPathRoutingEnum(
 	}
 }
 
+// The choices of one spec variant that get a preset button each.
+type PresetChoices = (spec: ControlSpec) => readonly EnumChoice[]
+
 function addSimpleEnum(
 	presets: CompanionPresetDefinitions,
 	logical: LogicalControl,
 	interactive: boolean,
 	showsFeedback: boolean,
-	choices: readonly EnumChoice[],
+	presetChoices: PresetChoices,
 ): void {
 	const actionLabel = EVENT_ACTION_LABEL[logical.key]
 
 	for (const slice of categorySlices(logical)) {
 		addDivider(presets, `${logical.key}${slice.keySuffix}`, slice.category, logical.name)
 
-		for (const choice of choices) {
-			const options = { ...slice.options, value: choice.id }
+		// Each FS can offer its own choices (Video Input Loss Mode), in its own value field.
+		const variant = specVariantFor(logical, presetTarget(logical, slice.options))
+		for (const choice of presetChoices(variant.spec)) {
+			const options = { ...slice.options, [variant.fieldId]: choice.id }
 			// Skip the prefix when the choice label already starts with it.
 			const prefix = actionLabel && !choice.label.toUpperCase().startsWith(actionLabel) ? actionLabel : undefined
 			addEnumChoiceButton(presets, logical, interactive, showsFeedback, {
@@ -298,17 +302,18 @@ function addSimpleEnum(
 function addEnum(presets: CompanionPresetDefinitions, logical: LogicalControl, interactive: boolean): void {
 	if (logical.spec.kind !== 'enum') return
 
-	const safeChoices = logical.spec.choices.filter((choice) => !choice.destructive)
-	const choices = logical.category === CATEGORY.EVENT_MEMORY ? safeChoices.slice(0, EVENT_PRESET_LIMIT) : safeChoices
+	const limit = logical.category === CATEGORY.EVENT_MEMORY ? EVENT_PRESET_LIMIT : undefined
+	const presetChoices: PresetChoices = (spec) =>
+		spec.kind === 'enum' ? spec.choices.filter((choice) => !choice.destructive).slice(0, limit) : []
 	const showsFeedback = isReadable(logical.spec)
 	const isPathRouting = logical.category === CATEGORY.PATH_ROUTING && logical.selectors.length > 0
 
 	if (isPathRouting) {
-		addPathRoutingEnum(presets, logical, interactive, showsFeedback, choices)
+		addPathRoutingEnum(presets, logical, interactive, showsFeedback, presetChoices)
 		return
 	}
 
-	addSimpleEnum(presets, logical, interactive, showsFeedback, choices)
+	addSimpleEnum(presets, logical, interactive, showsFeedback, presetChoices)
 }
 
 /**

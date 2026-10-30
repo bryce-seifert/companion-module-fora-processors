@@ -1,10 +1,18 @@
 import { InstanceStatus } from '@companion-module/base'
 import type { Socket } from 'node:net'
 import { EmberClient, Model, Types } from 'emberplus-connection'
-import { isReadable, isWritable, type ControlSpec } from './definitions/controls.js'
+import { isReadable, isWritable, parseEnumeration, type ControlSpec, type EnumChoice } from './definitions/controls.js'
 import type { ModuleInstance } from './main.js'
 import { describeIdentitySource, getModelSpec, isTruncatedDirectory, type ModelSpec } from './models.js'
-import { formatValue, groupByParent, PATH_DELIMITER, type VariableDefinition } from './state.js'
+import {
+	controlKey,
+	formatValue,
+	groupByParent,
+	NO_DEVICE_CHOICES,
+	PATH_DELIMITER,
+	type DeviceChoices,
+	type VariableDefinition,
+} from './state.js'
 import { errorMessage, withDeadline } from './util.js'
 import { walkTree, type DirFieldMask } from './walk.js'
 
@@ -39,6 +47,12 @@ interface LiveParameter {
 type WalkTarget =
 	| { readonly kind: 'parameter'; readonly leaf: string; readonly def: VariableDefinition }
 	| { readonly kind: 'label'; readonly leaf: string; readonly id: number; readonly into: Map<number, string> }
+
+// The choices a parameter's own enumeration offers; undefined if it carries none, so the table stays.
+function instanceChoices({ enumeration }: Model.Parameter): EnumChoice[] | undefined {
+	const choices = enumeration === undefined ? [] : parseEnumeration(enumeration)
+	return choices.length > 0 ? choices : undefined
+}
 
 // Run `worker` over `items` with at most `limit` promises in flight at a time.
 async function runPool<T>(items: readonly T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
@@ -154,6 +168,8 @@ export class ForaApi {
 	#retrying = false
 	// Parameters this unit actually carries, resolved on the current connection.
 	readonly #live = new Map<string, LiveParameter>()
+	// What the current connection has read of the unit's enum choices, kept to re-apply on change.
+	#deviceChoices: DeviceChoices = NO_DEVICE_CHOICES
 
 	constructor(self: ModuleInstance) {
 		this.#self = self
@@ -248,6 +264,8 @@ export class ForaApi {
 
 		const absentByKey = new Map<string, { count: number; sample: string }>()
 		const { groups, choiceLabels } = buildWalkTargets(this.#self.definitions, spec)
+		const enumerated = new Set(spec.deviceEnumeratedControls)
+		const perInstance = new Map<string, readonly EnumChoice[]>()
 		let labelsRead = 0
 
 		const stats = await walkTree(
@@ -271,6 +289,8 @@ export class ForaApi {
 						return
 					}
 					const { def } = target
+					const choices = enumerated.has(controlKey(def)) ? instanceChoices(node.contents) : undefined
+					if (choices) perInstance.set(def.id, choices)
 					this.#self.state.set(def.id, formatValue(def.control, value))
 					this.#live.set(def.id, { def, node, latestRaw: value, writeCount: 0 })
 				},
@@ -291,10 +311,8 @@ export class ForaApi {
 
 		if (this.#client !== client) return
 
-		if (choiceLabels.size > 0) {
-			this.#self.applyChoiceLabels(choiceLabels)
-			this.#rebindDefinitions()
-		}
+		this.#deviceChoices = { labels: choiceLabels, perInstance }
+		if (choiceLabels.size > 0 || perInstance.size > 0) this.#applyDeviceChoices()
 
 		let absentTotal = 0
 		for (const [key, { count, sample }] of [...absentByKey].sort((a, b) => b[1].count - a[1].count)) {
@@ -317,6 +335,26 @@ export class ForaApi {
 		await this.#subscribeAll(client)
 	}
 
+	#applyDeviceChoices(): void {
+		this.#self.applyDeviceChoices(this.#deviceChoices)
+		this.#rebindDefinitions()
+	}
+
+	// Switching the unit's mode (Dual HD, 4K/HD) changes which choices those parameters offer.
+	#updateInstanceChoices(live: LiveParameter, updated: Model.Parameter): void {
+		const spec = getModelSpec(this.#self.config.model)
+		if (!spec.deviceEnumeratedControls.includes(controlKey(live.def))) return
+		const choices = instanceChoices(updated)
+		if (!choices) return
+		const current = this.#deviceChoices.perInstance.get(live.def.id)
+		if (JSON.stringify(current) === JSON.stringify(choices)) return
+
+		const perInstance = new Map(this.#deviceChoices.perInstance)
+		perInstance.set(live.def.id, choices)
+		this.#deviceChoices = { ...this.#deviceChoices, perInstance }
+		this.#applyDeviceChoices()
+	}
+
 	// Relabelling replaces the definitions the walk resolved against; point what's already live at
 	// the new ones and reformat their values with the new labels.
 	#rebindDefinitions(): void {
@@ -335,6 +373,7 @@ export class ForaApi {
 				await client.subscribe(subscribeTarget(live.node), (updated) => {
 					if (this.#client !== client) return // stale update from a superseded client
 					if (updated.contents.type !== Model.ElementType.Parameter) return
+					this.#updateInstanceChoices(live, updated.contents)
 					live.latestRaw = updated.contents.value
 					this.#self.state.set(live.def.id, formatValue(live.def.control, updated.contents.value))
 				})
@@ -393,6 +432,13 @@ export class ForaApi {
 		const spec = live.def.control
 		if (spec.kind !== kind || !isWritable(spec)) {
 			this.#self.log('warn', `Cannot set "${id}": not a writable ${kind}`)
+			return undefined
+		}
+		// Writable in the tables, but the unit can lock one in its current mode or option fit (FA-9600
+		// SQD / 2SI Division on FS2). A field-masked listing omits access, so only an explicit lock counts.
+		const { access } = live.node.contents
+		if (access === Model.ParameterAccess.Read || access === Model.ParameterAccess.None) {
+			this.#self.log('warn', `Cannot set ${live.def.name}: the unit reports it read-only in its current mode`)
 			return undefined
 		}
 		return [live, spec as Extract<ControlSpec, { kind: K }>]

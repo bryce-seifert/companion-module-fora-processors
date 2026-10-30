@@ -73,6 +73,15 @@ export function isReadable(spec: ControlSpec): boolean {
 	return spec.access === 'read' || spec.access === 'readwrite'
 }
 
+// An Ember+ enumeration: one name per line, the line number being the value. The units mark
+// values that don't apply in the current mode or option fit with "~".
+export function parseEnumeration(enumeration: string): EnumChoice[] {
+	return enumeration
+		.split('\n')
+		.map((label, id) => ({ id, label: label.trim() }))
+		.filter((choice) => choice.label !== '' && choice.label !== '~')
+}
+
 // Same enum, device-supplied labels. Ids the device didn't name keep the table's own label, so a
 // partial read degrades to static text rather than blanking choices out of the dropdowns.
 export function relabelChoices(spec: EnumSpec, labels: ReadonlyMap<number, string>): EnumSpec {

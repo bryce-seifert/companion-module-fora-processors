@@ -57,7 +57,10 @@ function fsDefinitions(n: 1 | 2): DefinitionDraft[] {
 	add(`${fs}_back_color`, `${label} Back Color`, `${sync}/back-color`, CATEGORY.UTILITIES)
 	add(`${fs}_freeze`, `${label} Video Freeze On/Off`, `${sync}/video-freeze/freeze`, CATEGORY.UTILITIES)
 	add(`${fs}_freeze_mode`, `${label} Video Freeze Mode`, `${sync}/video-freeze/mode`, CATEGORY.UTILITIES)
-	add(`${fs}_uhd_input_link`, `${label} Input Link (4KFS/Workflow)`, `${sync}/uhd/input-link`, CATEGORY.FS_LINKING)
+	// FS2 is HD only in 4K/HD mode, so only FS1 carries a UHD input link.
+	if (n === 1) {
+		add(`${fs}_uhd_input_link`, `${label} Input Link (4KFS/Workflow)`, `${sync}/uhd/input-link`, CATEGORY.FS_LINKING)
+	}
 
 	// Specific names to ensure actions read as complete labels, not abbreviations.
 	const LEVEL_NAME: Record<string, string> = {
