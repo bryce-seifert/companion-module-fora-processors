@@ -1,7 +1,7 @@
 import { InstanceStatus } from '@companion-module/base'
 import type { Socket } from 'node:net'
 import { EmberClient, Model, Types } from 'emberplus-connection'
-import { isWritable, type ControlSpec } from './definitions/controls.js'
+import { isReadable, isWritable, type ControlSpec } from './definitions/controls.js'
 import type { ModuleInstance } from './main.js'
 import { describeIdentitySource, getModelSpec, isTruncatedDirectory, type ModelSpec } from './models.js'
 import { formatValue, groupByParent, PATH_DELIMITER, type VariableDefinition } from './state.js'
@@ -30,6 +30,8 @@ interface LiveParameter {
 	readonly node: Model.NumberedTreeNode<Model.Parameter>
 	// Un-scaled, pre-enum-label value, kept current for adjust/toggle.
 	latestRaw: Types.EmberValue | undefined
+	// Bumped per write, so a write's confirmation is skipped once a newer one has superseded it.
+	writeCount: number
 }
 
 // What the walk resolves: a declared parameter, or the string naming one enum choice (renameable
@@ -270,7 +272,7 @@ export class ForaApi {
 					}
 					const { def } = target
 					this.#self.state.set(def.id, formatValue(def.control, value))
-					this.#live.set(def.id, { def, node, latestRaw: value })
+					this.#live.set(def.id, { def, node, latestRaw: value, writeCount: 0 })
 				},
 				// Expected: subtrees are config-dependent and option blocks may be unfitted. The
 				// action stays in the UI either way; setting one that isn't there just warns.
@@ -410,11 +412,12 @@ export class ForaApi {
 		}
 		try {
 			const request = await client.setValue(writeTarget(live), value)
+			const write = ++live.writeCount
 			// The acknowledgement is a second promise, and an unhandled rejection from it would kill
 			// the module process. Not awaited. Some parameters (1616 audio `fade`) never notify their
 			// subscription, so the value the acknowledgement carries back is applied too.
-			request.response
-				?.then((updated) => {
+			withDeadline(request.response ?? Promise.resolve(undefined), REQUEST_DEADLINE_MS, `set ${live.def.id}`)
+				.then((updated) => {
 					if (this.#client !== client) return
 					if (updated?.contents.type !== Model.ElementType.Parameter) return
 					if (updated.contents.value === undefined) return
@@ -424,9 +427,25 @@ export class ForaApi {
 				.catch((error: unknown) => {
 					this.#self.log('debug', `No acknowledgement for ${live.def.id}: ${errorMessage(error)}`)
 				})
+				.finally(() => {
+					if (this.#client === client && live.writeCount === write) this.#confirmWrite(live, value)
+				})
 		} catch (error) {
 			this.#self.log('warn', `Failed to set ${live.def.id}: ${errorMessage(error)}`)
 		}
+	}
+
+	// The units take a write they can't apply without complaint and keep their old value, e.g. a
+	// 1616 colour space or gamma User slot with no file imported. Only readable enums and booleans
+	// are checked: write-only parameters report nothing back, and the unit may round numbers.
+	#confirmWrite(live: LiveParameter, value: Types.EmberValue): void {
+		const spec = live.def.control
+		if ((spec.kind !== 'enum' && spec.kind !== 'boolean') || !isReadable(spec)) return
+		if (live.latestRaw === value) return
+
+		const wanted = formatValue(spec, value)
+		const kept = live.latestRaw === undefined ? 'no value reported' : `still ${formatValue(spec, live.latestRaw)}`
+		this.#self.log('warn', `${live.def.name}: the unit did not apply ${wanted} (${kept})`)
 	}
 
 	// `getElementByPath` only matches nodes already in `client.tree`, so the root has to be loaded
