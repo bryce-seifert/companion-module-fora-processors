@@ -6,7 +6,12 @@ export type Access = 'read' | 'write' | 'readwrite'
 export interface EnumChoice {
 	readonly id: number
 	readonly label: string
+	// Wipes the unit's settings (factory reset, delete all). Never a dropdown's default, so an
+	// unchanged new button can't fire it, and never a one-press preset. Defaults to false.
+	readonly destructive?: boolean
 }
+
+export type ChoiceEntry = readonly [id: number, label: string, flags?: { readonly destructive: boolean }]
 
 export interface NumberSpec {
 	readonly kind: 'number'
@@ -52,10 +57,10 @@ export const bool = (access: Access): BooleanSpec => ({ kind: 'boolean', access 
 
 export const text = (access: Access): StringSpec => ({ kind: 'string', access })
 
-export const choice = (access: Access, choices: readonly (readonly [number, string])[]): EnumSpec => ({
+export const choice = (access: Access, choices: readonly ChoiceEntry[]): EnumSpec => ({
 	kind: 'enum',
 	access,
-	choices: choices.map(([id, label]) => ({ id, label })),
+	choices: choices.map(([id, label, flags]) => ({ id, label, ...flags })),
 })
 
 export function isWritable(spec: ControlSpec): boolean {

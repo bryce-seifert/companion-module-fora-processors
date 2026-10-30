@@ -281,7 +281,7 @@ function addSimpleEnum(
 
 		for (const choice of choices) {
 			const options = { ...slice.options, value: choice.id }
-			// Skip the prefix when the choice already says it ("Delete All" under DELETE).
+			// Skip the prefix when the choice label already starts with it.
 			const prefix = actionLabel && !choice.label.toUpperCase().startsWith(actionLabel) ? actionLabel : undefined
 			addEnumChoiceButton(presets, logical, interactive, showsFeedback, {
 				presetKey: `${logical.key}${slice.keySuffix}_${choice.id}`,
@@ -298,10 +298,8 @@ function addSimpleEnum(
 function addEnum(presets: CompanionPresetDefinitions, logical: LogicalControl, interactive: boolean): void {
 	if (logical.spec.kind !== 'enum') return
 
-	const choices =
-		logical.category === CATEGORY.EVENT_MEMORY
-			? logical.spec.choices.slice(0, EVENT_PRESET_LIMIT)
-			: logical.spec.choices
+	const safeChoices = logical.spec.choices.filter((choice) => !choice.destructive)
+	const choices = logical.category === CATEGORY.EVENT_MEMORY ? safeChoices.slice(0, EVENT_PRESET_LIMIT) : safeChoices
 	const showsFeedback = isReadable(logical.spec)
 	const isPathRouting = logical.category === CATEGORY.PATH_ROUTING && logical.selectors.length > 0
 

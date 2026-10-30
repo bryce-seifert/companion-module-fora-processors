@@ -100,9 +100,9 @@ export const FA1616_CONTROLS: Record<string, ControlSpec> = {
 	// CP YCbCr White — 32 instances
 	cp_ycbcr_white: num('readwrite', { min: 500, max: 1090, factor: 10, unit: '%' }),
 	// Delete Event (Number) — 1 instance ("0" deletes all)
-	event_delete: choice('write', [[0, 'Delete All'], ...eventChoices()]),
+	event_delete: choice('write', [[0, 'Delete All', { destructive: true }], ...eventChoices()]),
 	// Load Event (Number) — 1 instance ("0" loads default values)
-	event_load: choice('write', [[0, 'Default Values'], ...eventChoices()]),
+	event_load: choice('write', [[0, 'Default Values (Factory Settings)', { destructive: true }], ...eventChoices()]),
 	// Event Overwrite — 100 instances
 	event_overwrite: bool('readwrite'),
 	// Save Event (Number) — 1 instance

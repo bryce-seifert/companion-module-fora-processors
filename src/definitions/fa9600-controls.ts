@@ -251,7 +251,7 @@ export const FA9600_CONTROLS: Record<string, ControlSpec> = {
 	// Event 100 - Name — 1 instance
 	event_100: text('read'),
 	// Load Event (Number) — 1 instance
-	event_load: choice('write', [[0, 'Default Event'], ...eventChoices()]),
+	event_load: choice('write', [[0, 'Default Event (Factory Settings)', { destructive: true }], ...eventChoices()]),
 	// Save Event (Number) — 1 instance
 	event_save: choice('write', eventChoices()),
 	// FS2 Sync Setting Mode (Auto/Manual) — 2 instances

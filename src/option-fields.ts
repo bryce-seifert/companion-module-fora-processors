@@ -86,9 +86,10 @@ export function enumValueFields(logical: LogicalControl): CompanionInputFieldDro
 	return logical.specVariants.flatMap((variant) => {
 		if (variant.spec.kind !== 'enum') return []
 		const choices = variant.spec.choices.map((choice) => ({ id: choice.id, label: choice.label }))
+		const defaultChoice = variant.spec.choices.find((choice) => !choice.destructive) ?? variant.spec.choices[0]
 		return [
 			{
-				...dropdownField(variant.fieldId, logical.name, choices, choices[0]?.id ?? 0),
+				...dropdownField(variant.fieldId, logical.name, choices, defaultChoice?.id ?? 0),
 				isVisibleExpression: variant.isVisibleExpression,
 			},
 		]
